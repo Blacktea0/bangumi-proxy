@@ -10,19 +10,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Conan packages
-        uses: actions/cache@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
         with:
           path: ~/.conan2
           key: conan-openssl-4.0.1-linux-v1
-
-      - name: Install Conan
-        run: pip install conan
-
+      - run: pip install conan
       - name: Install OpenSSL 4.0 via Conan
         run: |
           conan profile detect
@@ -36,8 +29,7 @@ jobs:
           VirtualRunEnv
           EOF
           cd conan && conan install . --build=missing -s build_type=Release
-
-      - name: Build bangumi-proxy
+      - name: Build
         run: |
           CONAN_PKG=$(find ~/.conan2/p -path "*/p/include/openssl/ech.h" 2>/dev/null | head -1 | sed 's|/include/openssl/ech.h||')
           echo "CONAN_PKG=$CONAN_PKG"
@@ -45,19 +37,14 @@ jobs:
           export OPENSSL_INCLUDE_DIR=$CONAN_PKG/include
           export OPENSSL_LIB_DIR=$CONAN_PKG/lib
           export OPENSSL_STATIC=1
-          ls $OPENSSL_INCLUDE_DIR/openssl/ech.h && echo "✓ ech.h"
-          ls $OPENSSL_LIB_DIR/libssl.a && echo "✓ libssl.a"
           cargo build --release
-
       - name: Package
         run: |
           mkdir -p dist
           cp target/release/bangumi-proxy dist/
           cp ca.pem ca-key.pem dist/
           tar czf "bangumi-proxy-${GITHUB_REF_NAME}-linux-x86_64.tar.gz" -C dist .
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: linux-x86_64
           path: bangumi-proxy-*-linux-x86_64.tar.gz
@@ -66,19 +53,12 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Conan packages
-        uses: actions/cache@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
         with:
           path: ~/.conan2
           key: conan-openssl-4.0.1-windows-v1
-
-      - name: Install Conan
-        run: pip install conan
-
+      - run: pip install conan
       - name: Install OpenSSL 4.0 via Conan
         shell: pwsh
         run: |
@@ -93,19 +73,18 @@ jobs:
           VirtualRunEnv
           "@
           cd conan; conan install . --build=missing -s build_type=Release
-
-      - name: Build bangumi-proxy
+      - name: Build
         shell: pwsh
         run: |
-          $ech = Get-ChildItem -Path "$env:USERPROFILE\.conan2\p" -Recurse -Filter "ech.h" -ErrorAction SilentlyContinue | Where-Object { $_.DirectoryName -match "openssl" } | Select-Object -First 1
-          $CONAN_PKG = $ech.Directory.Parent.Parent.FullName
+          # Find libssl.lib to locate the Conan package directory
+          $libFile = Get-ChildItem -Path "$env:USERPROFILE\.conan2\p" -Recurse -Filter "libssl.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $CONAN_PKG = $libFile.Directory.Parent.FullName
           echo "CONAN_PKG=$CONAN_PKG"
           $env:OPENSSL_DIR = $CONAN_PKG
           $env:OPENSSL_INCLUDE_DIR = "$CONAN_PKG\include"
-          $env:OPENSSL_LIB_DIR = "$CONAN_PKG\lib"
+          $env:OPENSSL_LIB_DIR = $libFile.DirectoryName
           $env:OPENSSL_STATIC = "1"
           cargo build --release
-
       - name: Package
         shell: pwsh
         run: |
@@ -113,9 +92,7 @@ jobs:
           Copy-Item target\release\bangumi-proxy.exe dist\
           Copy-Item ca.pem, ca-key.pem dist\
           Compress-Archive -Path dist\* -DestinationPath "bangumi-proxy-${env:GITHUB_REF_NAME}-windows-x86_64.zip"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: windows-x86_64
           path: bangumi-proxy-*-windows-x86_64.zip
@@ -127,13 +104,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: artifacts
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**/*
           generate_release_notes: true
