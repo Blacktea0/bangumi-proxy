@@ -76,8 +76,8 @@ jobs:
       - name: Build
         shell: pwsh
         run: |
-          # Find libssl.lib to locate the Conan package directory
-          $libFile = Get-ChildItem -Path "$env:USERPROFILE\.conan2\p" -Recurse -Filter "libssl.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
+          # Find the Conan package directory (p\<hash>\p\lib\libssl.lib)
+          $libFile = Get-ChildItem -Path "$env:USERPROFILE\.conan2\p" -Recurse -Filter "libssl.lib" -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match "\\p\\lib\\" } | Select-Object -First 1
           $CONAN_PKG = $libFile.Directory.Parent.FullName
           echo "CONAN_PKG=$CONAN_PKG"
           $env:OPENSSL_DIR = $CONAN_PKG
