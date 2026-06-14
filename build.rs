@@ -4,23 +4,28 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(no_ech)");
 
     if cfg!(target_os = "windows") {
-        // Windows: use scoop's static OpenSSL 4.0
-        let openssl_dir = format!(
-            "{}\\scoop\\apps\\openssl\\current",
-            std::env::var("USERPROFILE").unwrap_or_default()
-        );
-        let lib_dir = format!("{openssl_dir}\\lib");
-        let include_dir = format!("{openssl_dir}\\include");
+        // Windows: check OPENSSL_DIR env first, fall back to scoop
+        let openssl_dir = std::env::var("OPENSSL_DIR").ok()
+            .unwrap_or_else(|| format!("{}\\scoop\\apps\\openssl\\current", std::env::var("USERPROFILE").unwrap_or_default()));
+        let include_dir = std::env::var("OPENSSL_INCLUDE_DIR").ok()
+            .unwrap_or_else(|| format!("{openssl_dir}\\include"));
+        let lib_dir = std::env::var("OPENSSL_LIB_DIR").ok()
+            .unwrap_or_else(|| format!("{openssl_dir}\\lib"));
 
-        cc::Build::new()
-            .file("ech_helper.c")
-            .include(&include_dir)
-            .compile("ech_helper");
+        // Try to compile ECH helper
+        let ech_available = std::path::Path::new(&format!("{include_dir}\\openssl\\ech.h")).exists();
 
-        println!("cargo:rustc-env=OPENSSL_STATIC=1");
-        println!("cargo:rustc-link-search=native={lib_dir}");
-        println!("cargo:rustc-link-lib=static=libssl_static");
-        println!("cargo:rustc-link-lib=static=libcrypto_static");
+        if ech_available {
+            cc::Build::new()
+                .file("ech_helper.c")
+                .include(&include_dir)
+                .compile("ech_helper");
+            println!("cargo:rustc-cfg=has_ech");
+        } else {
+            println!("cargo:rustc-cfg=no_ech");
+        }
+
+        // Let openssl-sys handle OpenSSL linking via OPENSSL_DIR env
         println!("cargo:rustc-link-lib=ws2_32");
         println!("cargo:rustc-link-lib=crypt32");
         println!("cargo:rustc-link-lib=advapi32");
