@@ -27,6 +27,8 @@ mod ffi {
 
 const OUTER_SNI: &str = "cloudflare-ech.com";
 const TARGETS: &[&str] = &["chii.in", "lain.bgm.tv", "bgm.tv"];
+const CF_DOH_IP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(1, 1, 1, 1);
+const CF_DOH_HOST: &str = "cloudflare-dns.com";
 
 /// bangumi-proxy — HTTP 代理 + ECH 绕过 GFW
 #[derive(Parser, Debug)]
@@ -66,12 +68,12 @@ impl EchCache {
             ips: Mutex::new(HashMap::new()),
         }
     }
-
-    fn get_ech(&self, host: &str) -> io::Result<Vec<u8>> {
+    fn get_ech(&self) -> io::Result<Vec<u8>> {
         if let Some(cfg) = &*self.config.lock() { return Ok(cfg.clone()); }
-        // Use this host's Cloudflare IP for GREASE
-        let ip = self.get_ip(host)?;
-        println!("[ECH] GREASE → {ip}…");
+        // Bootstrap: resolve cloudflare-dns.com via doh.pub, then GREASE ECH
+        println!("[ECH] Bootstrap: resolving {CF_DOH_HOST} via doh.pub…");
+        let ip = resolve_cf_ip_fallback(CF_DOH_HOST)?;
+        println!("[ECH] {CF_DOH_HOST} → {ip}, GREASE ECH…");
         let cfg = grease_ech(ip)?;
         println!("[ECH] {} byte retry-config", cfg.len());
         *self.config.lock() = Some(cfg.clone());
@@ -80,11 +82,39 @@ impl EchCache {
 
     fn get_ip(&self, host: &str) -> io::Result<std::net::Ipv4Addr> {
         if let Some(ip) = self.ips.lock().get(host) { return Ok(*ip); }
-        println!("[DNS] Resolving {host}…");
-        let ip = resolve_cf_ip(host)?;
-        println!("[DNS] {host} → {ip}");
+        // Try ECH-protected Cloudflare DoH first (unpolluted)
+        let ip = match self.resolve_via_ech(host) {
+            Ok(ip) => {
+                println!("[DNS] {host} → {ip} (via ECH DoH)");
+                ip
+            }
+            Err(e) => {
+                eprintln!("[DNS] ECH DoH failed: {e}, falling back to doh.pub");
+                let ip = resolve_cf_ip_fallback(host)?;
+                println!("[DNS] {host} → {ip} (via doh.pub)");
+                ip
+            }
+        };
         self.ips.lock().insert(host.to_string(), ip);
         Ok(ip)
+    }
+
+    /// Resolve host via ECH-protected cloudflare-dns.com
+    fn resolve_via_ech(&self, host: &str) -> io::Result<std::net::Ipv4Addr> {
+        let ecl = self.get_ech()?;
+        let mut backend = connect_backend(CF_DOH_HOST, CF_DOH_IP, &ecl)?;
+        let path = format!("/dns-query?name={host}&type=A");
+        backend.write_all(format!(
+            "GET {path} HTTP/1.1\r\nHost: {CF_DOH_HOST}\r\nAccept: application/dns-json\r\nConnection: close\r\n\r\n"
+        ).as_bytes())?;
+        backend.flush()?;
+        let mut buf = vec![];
+        backend.read_to_end(&mut buf)?;
+        let h = buf.windows(4).position(|w| w == b"\r\n\r\n")
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no hdr"))?;
+        let j = String::from_utf8(buf[h + 4..].to_vec())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "utf8"))?;
+        parse_first_a(&j).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no A in ECH DoH"))
     }
 
     fn invalidate(&self) { self.config.lock().take(); }
@@ -117,23 +147,21 @@ fn doh_json(host: &str, path: &str) -> io::Result<String> {
     String::from_utf8(buf[h + 4..].to_vec()).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "utf8"))
 }
 
-fn resolve_cf_ip(host: &str) -> io::Result<std::net::Ipv4Addr> {
-    let j = doh_json("doh.pub", &format!("/dns-query?name={host}&type=A"))?;
-    let ans_start = j
-        .find("\"Answer\"")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no Answer"))?;
-    let ans = &j[ans_start..];
-    let data_pos = ans
-        .find("\"data\":\"")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no data"))?;
+fn parse_first_a(json: &str) -> Option<std::net::Ipv4Addr> {
+    let ans_start = json.find("\"Answer\"")?;
+    let ans = &json[ans_start..];
+    let data_pos = ans.find("\"data\":\"")?;
     let after = &ans[data_pos + 8..];
-    let end = after
-        .find('"')
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no quote"))?;
-    after[..end]
-        .parse()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("bad IP: {}", &after[..end])))
+    let end = after.find('"')?;
+    after[..end].parse().ok()
 }
+
+fn resolve_cf_ip_fallback(host: &str) -> io::Result<std::net::Ipv4Addr> {
+    let j = doh_json("doh.pub", &format!("/dns-query?name={host}&type=A"))?;
+    parse_first_a(&j).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no A record"))
+}
+
+/// Fallback DNS via doh.pub (may be polluted)
 fn grease_ech(ip: std::net::Ipv4Addr) -> io::Result<Vec<u8>> {
     let host = std::ffi::CString::new(ip.to_string()).unwrap();
     let sni = std::ffi::CString::new(OUTER_SNI).unwrap();
@@ -147,6 +175,7 @@ fn grease_ech(ip: std::net::Ipv4Addr) -> io::Result<Vec<u8>> {
         Err(io::Error::new(io::ErrorKind::Other, "GREASE ECH failed"))
     }
 }
+
 static INIT: std::sync::Once = std::sync::Once::new();
 
 fn connect_backend(host: &str, ip: std::net::Ipv4Addr, ecl: &[u8]) -> io::Result<openssl::ssl::SslStream<TcpStream>> {
@@ -177,7 +206,7 @@ fn connect_backend(host: &str, ip: std::net::Ipv4Addr, ecl: &[u8]) -> io::Result
 
 /// Helper: resolve ECH config + IP, then connect to backend.
 fn open_backend(host: &str, cache: &EchCache) -> io::Result<openssl::ssl::SslStream<TcpStream>> {
-    let ecl = cache.get_ech(host)?;
+    let ecl = cache.get_ech()?;
     let ip = cache.get_ip(host)?;
     match connect_backend(host, ip, &ecl) {
         Ok(s) => Ok(s),
