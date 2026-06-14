@@ -22,9 +22,22 @@ mod ffi {
 }
 
 const OUTER_SNI: &str = "cloudflare-ech.com";
-const TARGETS: &[&str] = &["chii.in", "lain.bgm.tv", "bgm.tv"];
-const CF_DOH_IP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(1, 1, 1, 1);
+const TARGETS: &[&str] = &["chii.in", "lain.bgm.tv", "bgm.tv", "next.bgm.tv"];
+const CF_DOH_IP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(104, 16, 248, 249);
 const CF_DOH_HOST: &str = "cloudflare-dns.com";
+
+/// Hardcoded Cloudflare IPs for target domains (queried via CF DoH through system proxy).
+/// Used when live DNS returns non-Cloudflare IPs (GFW DNS poisoning).
+const CF_HOSTS: &[(&str, &[std::net::Ipv4Addr])] = &[
+    ("chii.in", &[std::net::Ipv4Addr::new(172, 67, 201, 187), std::net::Ipv4Addr::new(104, 21, 93, 3)]),
+    ("lain.bgm.tv", &[std::net::Ipv4Addr::new(172, 67, 73, 67), std::net::Ipv4Addr::new(104, 26, 8, 23), std::net::Ipv4Addr::new(104, 26, 9, 23)]),
+    ("bgm.tv", &[std::net::Ipv4Addr::new(172, 67, 73, 67), std::net::Ipv4Addr::new(104, 26, 9, 23), std::net::Ipv4Addr::new(104, 26, 8, 23)]),
+    ("next.bgm.tv", &[std::net::Ipv4Addr::new(104, 26, 8, 23), std::net::Ipv4Addr::new(104, 26, 9, 23), std::net::Ipv4Addr::new(172, 67, 73, 67)]),
+];
+
+fn lookup_cf_host(host: &str) -> Option<std::net::Ipv4Addr> {
+    CF_HOSTS.iter().find(|(h, _)| *h == host).and_then(|(_, ips)| ips.first().copied())
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "bangumi-proxy", version, about = "HTTP/HTTPS proxy + ECH")]
@@ -104,8 +117,31 @@ impl EchCache {
         if let Some(ip) = self.ips.lock().get(host) { return Ok(*ip); }
         let ip = match self.resolve_via_ech(host) {
             Ok(ip) => { println!("[DNS] {host} → {ip} (ECH)"); ip }
-            Err(e) => { eprintln!("[DNS] ECH: {e}"); let ip = self.resolve_host(host)?; println!("[DNS] {host} → {ip} ({})", self.dns); ip }
+            Err(e) => { eprintln!("[DNS] ECH: {e}"); match self.resolve_host(host) {
+                Ok(ip) => { println!("[DNS] {host} → {ip} ({})", self.dns); ip }
+                Err(e2) => { eprintln!("[DNS] DoH: {e2}"); return self.cf_hosts_or_err(host); }
+            }}
         };
+        // If DNS returned a non-Cloudflare IP, it's likely poisoned — use hardcoded CF IP
+        if !is_cloudflare_ip(ip) {
+            if let Some(cf_ip) = lookup_cf_host(host) {
+                eprintln!("[DNS] {host} → {ip} (poisoned! using cached {cf_ip})");
+                self.ips.lock().insert(host.to_string(), cf_ip);
+                return Ok(cf_ip);
+            }
+        }
+        self.ips.lock().insert(host.to_string(), ip);
+        Ok(ip)
+    }
+    fn cf_hosts_or_err(&self, host: &str) -> io::Result<std::net::Ipv4Addr> {
+        if let Some(ip) = lookup_cf_host(host) {
+            println!("[DNS] {host} → {ip} (hardcoded)");
+            self.ips.lock().insert(host.to_string(), ip);
+            return Ok(ip);
+        }
+        // Not a known target — try system DNS as last resort
+        let ip = system_dns(host)?;
+        println!("[DNS] {host} → {ip} (system)");
         self.ips.lock().insert(host.to_string(), ip);
         Ok(ip)
     }
@@ -135,7 +171,8 @@ impl EchCache {
         let h = buf.windows(4).position(|w| w == b"\r\n\r\n").ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no hdr"))?;
         parse_a(&String::from_utf8_lossy(&buf[h+4..])).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no A"))
     }
-    fn invalidate(&self) { self.config.lock().take(); }
+    fn set_ip(&self, host: &str, ip: std::net::Ipv4Addr) { self.ips.lock().insert(host.to_string(), ip); }
+     fn invalidate(&self) { self.config.lock().take(); }
 }
 
 // ============================= DNS =========================================
@@ -179,6 +216,13 @@ fn resolve_plain_dns(server: &str, host: &str) -> io::Result<std::net::Ipv4Addr>
     for _ in 0..an { p = skip_name(r, p)?; if p+10 > r.len() { break; } let t = u16::from_be_bytes([r[p],r[p+1]]); let rl = u16::from_be_bytes([r[p+8],r[p+9]]) as usize; p += 10; if t == 1 && rl == 4 && p+4 <= r.len() { return Ok(std::net::Ipv4Addr::new(r[p],r[p+1],r[p+2],r[p+3])); } p += rl; }
     Err(io::Error::new(io::ErrorKind::NotFound, "no A"))
 }
+fn system_dns(host: &str) -> io::Result<std::net::Ipv4Addr> {
+    for server in &["119.29.29.29", "223.5.5.5"] {
+        if let Ok(ip) = resolve_plain_dns(server, host) { return Ok(ip); }
+    }
+    // Last resort: OS resolver
+    format!("{host}:443").to_socket_addrs()?.find(|a| a.is_ipv4()).map(|a| match a.ip() { std::net::IpAddr::V4(v) => v, _ => unreachable!() }).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no A"))
+}
 fn grease_ech(ip: std::net::Ipv4Addr) -> io::Result<Vec<u8>> {
     let h = std::ffi::CString::new(ip.to_string()).unwrap(); let s = std::ffi::CString::new(OUTER_SNI).unwrap();
     let (mut c, mut l): (*mut u8, usize) = (std::ptr::null_mut(), 0);
@@ -200,7 +244,7 @@ fn connect_ech(host: &str, ip: std::net::Ipv4Addr, ecl: &[u8]) -> io::Result<ope
     let ci = std::ffi::CString::new(host).unwrap(); let co = std::ffi::CString::new(OUTER_SNI).unwrap();
     unsafe { ffi::SSL_ech_set1_server_names(ssl.as_ptr(), ci.as_ptr(), co.as_ptr(), 0) };
     let tcp = TcpStream::connect(format!("{ip}:443"))?;
-    tcp.set_read_timeout(Some(std::time::Duration::from_secs(30)))?; tcp.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(10)))?; tcp.set_write_timeout(Some(std::time::Duration::from_secs(10)))?;
     let st = ssl.connect(tcp).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
     let s = unsafe { ffi::SSL_ech_get1_status(st.ssl().as_ptr(), std::ptr::null_mut(), std::ptr::null_mut()) };
     println!("[ECH] {host} → {ip} status={s}");
@@ -224,26 +268,47 @@ fn connect_direct(host: &str) -> io::Result<openssl::ssl::SslStream<TcpStream>> 
 }
 
 fn open_backend(host: &str, cache: &EchCache) -> io::Result<openssl::ssl::SslStream<TcpStream>> {
-    // Target domains: use ECH. Others: try ECH first, fall back to direct.
-    if is_target(host) {
-        let ecl = cache.get_ech()?; let ip = cache.get_ip(host)?;
-        return match connect_ech(host, ip, &ecl) { Ok(s) => Ok(s), Err(e) => { cache.invalidate(); Err(e) } };
-    }
-    // Non-target: try ECH (if DNS gives us a Cloudflare IP), then direct
-    match cache.get_ip(host) {
-        Ok(ip) if is_cloudflare_ip(ip) => {
-            if let Ok(ecl) = cache.get_ech() {
-                if let Ok(s) = connect_ech(host, ip, &ecl) { return Ok(s); }
+    let ip = cache.get_ip(host)?;
+    if is_cloudflare_ip(ip) {
+        if let Ok(ecl) = cache.get_ech() {
+            // Try cached IP first, then rotate through hardcoded CF IPs
+            let mut tried = vec![ip];
+            match connect_ech(host, ip, &ecl) { Ok(s) => return Ok(s), Err(e) => { eprintln!("[ECH] {host} → {ip}: {e}"); } }
+            if let Some(ips) = cf_hosts_list(host) {
+                for &alt in ips {
+                    if tried.contains(&alt) { continue; }
+                    tried.push(alt);
+                    match connect_ech(host, alt, &ecl) { Ok(s) => { cache.set_ip(host, alt); return Ok(s); } Err(e) => { eprintln!("[ECH] {host} → {alt}: {e}"); } }
+                }
             }
+            cache.invalidate();
         }
-        _ => {}
+    } else if is_target(host) {
+        println!("[open] {host} → {ip} (not Cloudflare, direct TLS)");
     }
     connect_direct(host)
 }
 
+fn cf_hosts_list(host: &str) -> Option<&'static [std::net::Ipv4Addr]> {
+    CF_HOSTS.iter().find(|(h, _)| *h == host).map(|(_, ips)| *ips)
+}
+
 fn is_cloudflare_ip(ip: std::net::Ipv4Addr) -> bool {
     let o = ip.octets();
-    o[0] == 104 || o[0] == 172 && o[1] >= 64 && o[1] <= 95 || o[0] == 162 && o[1] == 159 || o[0] == 188 && o[1] == 114
+    // 104.16.0.0/12, 172.64.0.0/13, 162.158.0.0/15, 188.114.96.0/20,
+    // 190.93.240.0/20, 197.234.240.0/22, 198.41.128.0/17, 131.0.72.0/22,
+    // 103.21.244.0/22, 103.22.200.0/22, 103.31.4.0/22
+    (o[0] == 104 && o[1] >= 16 && o[1] <= 31)
+        || (o[0] == 172 && o[1] >= 64 && o[1] <= 71)
+        || (o[0] == 162 && o[1] == 158)
+        || (o[0] == 188 && o[1] == 114)
+        || (o[0] == 190 && o[1] == 93)
+        || (o[0] == 197 && o[1] == 234)
+        || (o[0] == 198 && o[1] == 41)
+        || (o[0] == 131 && o[1] == 0)
+        || (o[0] == 103 && o[1] == 21 && o[2] >= 244 && o[2] <= 247)
+        || (o[0] == 103 && o[1] == 22 && o[2] >= 200 && o[2] <= 203)
+        || (o[0] == 103 && o[1] == 31 && o[2] >= 4 && o[2] <= 7)
 }
 
 fn handle_connect(client: &mut TcpStream, host: &str, cache: &EchCache, ps: &str, ca: &MitmCa) {
@@ -359,8 +424,10 @@ fn find_chrome() -> Option<String> {
     which::which("chrome").ok().or_else(|| which::which("msedge").ok()).map(|p| p.display().to_string())
 }
 fn launch_browser(chrome: &str, proxy: &str, url: &str) {
-    let p = format!("{}/bangumi-proxy-chrome", std::env::temp_dir().display());
-    println!("[browser] {chrome} proxy=http://{proxy} url={url}\n");
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let p = format!("{}/bangumi-proxy-{ts}", std::env::temp_dir().display());
+    println!("[browser] {chrome} proxy=http://{proxy} url={url}");
+    println!("[browser] profile={p}\n");
     let _ = std::process::Command::new(chrome).args([format!("--proxy-server=http://{proxy}"), "--remote-debugging-port=9222".into(), "--no-first-run".into(), "--no-default-browser-check".into(), format!("--user-data-dir={p}"), "--ignore-certificate-errors".into(), url.into()]).spawn();
 }
 
@@ -376,7 +443,7 @@ fn main() -> io::Result<()> {
     println!("║  bangumi-proxy — HTTP/HTTPS + ECH 绕过 GFW                  ║");
     println!("╠══════════════════════════════════════════════════════════════╣");
     println!("║  代理: http://{addr:<44}║");
-    println!("║  站点: chii.in / lain.bgm.tv / bgm.tv                     ║");
+    println!("║  站点: chii.in / lain.bgm.tv / bgm.tv / next.bgm.tv       ║");
     println!("║  DNS:  {:<52} ║", if fixed_ip.is_some() { format!("fixed → {}", args.ip.as_deref().unwrap()) } else { args.dns.clone() });
     println!("║  MITM: 自签 CA，支持 HTTPS                                  ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
