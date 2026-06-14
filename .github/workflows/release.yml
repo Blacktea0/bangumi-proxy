@@ -18,7 +18,7 @@ jobs:
       - run: pip install conan
       - name: Install OpenSSL 4.0 via Conan
         run: |
-          conan profile detect
+          conan profile detect --force
           mkdir -p conan
           cat > conan/conanfile.txt << 'EOF'
           [requires]
@@ -62,7 +62,7 @@ jobs:
       - name: Install OpenSSL 4.0 via Conan
         shell: pwsh
         run: |
-          conan profile detect
+          conan profile detect --force
           mkdir conan -Force
           Set-Content -Path "conan\conanfile.txt" -Value @"
           [requires]
