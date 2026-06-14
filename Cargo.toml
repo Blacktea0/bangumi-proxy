@@ -1,0 +1,13 @@
+[package]
+name = "bangumi-proxy"
+version = "0.3.0"
+edition = "2021"
+
+[dependencies]
+openssl-sys = "0.9"
+openssl = "0.10"
+foreign-types-shared = "0.1"
+parking_lot = "0.12"
+
+[build-dependencies]
+cc = "1"
