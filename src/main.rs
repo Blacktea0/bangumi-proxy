@@ -1,5 +1,5 @@
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::sync::Arc;
 use std::thread;
 
@@ -7,6 +7,8 @@ use clap::Parser;
 use foreign_types_shared::ForeignType;
 use foreign_types_shared::ForeignTypeRef;
 use parking_lot::Mutex;
+
+// ============================= FFI ==========================================
 
 unsafe extern "C" {
     fn ech_get_retry_config(host: *const std::os::raw::c_char, port: std::os::raw::c_int, outer_sni: *const std::os::raw::c_char, out_cfg: *mut *mut u8, out_len: *mut usize) -> std::os::raw::c_int;
@@ -21,6 +23,8 @@ mod ffi {
     }
 }
 
+// ============================= Config =======================================
+
 const OUTER_SNI: &str = "cloudflare-ech.com";
 const TARGETS: &[&str] = &["chii.in", "lain.bgm.tv", "bgm.tv"];
 const CF_DOH_IP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(1, 1, 1, 1);
@@ -33,13 +37,16 @@ struct Args {
     #[arg(short, long)] browser: bool,
     #[arg(short, long, default_value = "http://chii.in")] url: String,
     #[arg(long)] chrome: Option<String>,
+    /// DNS server: DoH URL ("https://doh.pub/dns-query") or plain IP ("8.8.8.8")
+    #[arg(long, default_value = "https://doh.pub/dns-query")]
+    dns: String,
 }
 
 fn is_target(host: &str) -> bool {
     TARGETS.iter().any(|&t| host == t || host.ends_with(&format!(".{t}")))
 }
 
-// ============================= CA ==========================================
+// ============================= CA ===========================================
 
 struct MitmCa { ca_key: rcgen::KeyPair, ca_cert: rcgen::Certificate }
 
@@ -77,30 +84,62 @@ impl MitmCa {
     }
 }
 
-// ============================= ECH cache ===================================
+// ============================= ECH cache ====================================
 
-struct EchCache { config: Mutex<Option<Vec<u8>>>, ips: Mutex<std::collections::HashMap<String, std::net::Ipv4Addr>> }
+struct EchCache {
+    config: Mutex<Option<Vec<u8>>>,
+    ips: Mutex<std::collections::HashMap<String, std::net::Ipv4Addr>>,
+    dns: String, // DoH URL or plain DNS IP
+}
+
 impl EchCache {
-    fn new() -> Self { Self { config: Mutex::new(None), ips: Mutex::new(std::collections::HashMap::new()) } }
+    fn new(dns: String) -> Self {
+        Self { config: Mutex::new(None), ips: Mutex::new(std::collections::HashMap::new()), dns }
+    }
+
     fn get_ech(&self) -> io::Result<Vec<u8>> {
         if let Some(c) = &*self.config.lock() { return Ok(c.clone()); }
-        let ip = resolve_fallback(CF_DOH_HOST)?;
+        let ip = self.resolve_host(CF_DOH_HOST)?;
         println!("[ECH] {CF_DOH_HOST} → {ip}, GREASE…");
         let c = grease_ech(ip)?;
         println!("[ECH] {} bytes", c.len());
         *self.config.lock() = Some(c.clone());
         Ok(c)
     }
+
     fn get_ip(&self, host: &str) -> io::Result<std::net::Ipv4Addr> {
         if let Some(ip) = self.ips.lock().get(host) { return Ok(*ip); }
-        let ip = match self.ech_dns(host) {
+        let ip = match self.resolve_via_ech(host) {
             Ok(ip) => { println!("[DNS] {host} → {ip} (ECH)"); ip }
-            Err(e) => { eprintln!("[DNS] ECH failed: {e}"); let ip = resolve_fallback(host)?; println!("[DNS] {host} → {ip} (pub)"); ip }
+            Err(e) => {
+                eprintln!("[DNS] ECH failed: {e}");
+                let ip = self.resolve_host(host)?;
+                println!("[DNS] {host} → {ip} ({})", self.dns); ip
+            }
         };
         self.ips.lock().insert(host.to_string(), ip);
         Ok(ip)
     }
-    fn ech_dns(&self, host: &str) -> io::Result<std::net::Ipv4Addr> {
+
+    /// Resolve via configured DNS (DoH URL or plain DNS IP)
+    fn resolve_host(&self, host: &str) -> io::Result<std::net::Ipv4Addr> {
+        if self.dns.starts_with("http") {
+            // DoH
+            let (doh_host, path) = if self.dns.contains("/dns-query") {
+                let (h, _) = self.dns.split_at(self.dns.find("/dns-query").unwrap());
+                (h.trim_start_matches("https://").trim_start_matches("http://"), "/dns-query")
+            } else {
+                (self.dns.trim_start_matches("https://").trim_start_matches("http://"), "/dns-query")
+            };
+            let j = doh_json(doh_host, &format!("{path}?name={host}&type=A"))?;
+            parse_a(&j).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no A"))
+        } else {
+            // Plain DNS (IP address)
+            resolve_plain_dns(&self.dns, host)
+        }
+    }
+
+    fn resolve_via_ech(&self, host: &str) -> io::Result<std::net::Ipv4Addr> {
         let ecl = self.get_ech()?;
         let mut b = connect_ech(CF_DOH_HOST, CF_DOH_IP, &ecl)?;
         b.write_all(format!("GET /dns-query?name={host}&type=A HTTP/1.1\r\nHost: {CF_DOH_HOST}\r\nAccept: application/dns-json\r\nConnection: close\r\n\r\n").as_bytes())?;
@@ -109,6 +148,7 @@ impl EchCache {
         let h = buf.windows(4).position(|w| w == b"\r\n\r\n").ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no hdr"))?;
         parse_a(&String::from_utf8_lossy(&buf[h+4..])).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no A"))
     }
+
     fn invalidate(&self) { self.config.lock().take(); }
 }
 
@@ -118,7 +158,8 @@ fn tls_skip() -> openssl::ssl::SslConnector {
     let mut b = openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls_client()).unwrap();
     b.set_verify(openssl::ssl::SslVerifyMode::NONE); b.build()
 }
-fn doh(host: &str, path: &str) -> io::Result<String> {
+
+fn doh_json(host: &str, path: &str) -> io::Result<String> {
     let tcp = TcpStream::connect(format!("{host}:443"))?;
     tcp.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
     let mut s = tls_skip().connect(host, tcp).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
@@ -128,24 +169,69 @@ fn doh(host: &str, path: &str) -> io::Result<String> {
     let h = buf.windows(4).position(|w| w == b"\r\n\r\n").ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no hdr"))?;
     String::from_utf8(buf[h+4..].to_vec()).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "utf8"))
 }
+
 fn parse_a(j: &str) -> Option<std::net::Ipv4Addr> {
     let i = j.find("\"Answer\"")?; let d = j[i..].find("\"data\":\"")?; let a = &j[i+d+8..]; let e = a.find('"')?; a[..e].parse().ok()
 }
-fn resolve_fallback(h: &str) -> io::Result<std::net::Ipv4Addr> {
-    parse_a(&doh("doh.pub", &format!("/dns-query?name={h}&type=A"))?).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no A"))
+
+fn skip_name(data: &[u8], mut p: usize) -> io::Result<usize> {
+    loop {
+        if p >= data.len() { return Err(io::Error::new(io::ErrorKind::InvalidData, "name overflow")); }
+        let b = data[p];
+        if b == 0 { return Ok(p + 1); }
+        if b & 0xC0 == 0xC0 { return Ok(p + 2); }
+        p += 1 + b as usize;
+    }
 }
+
+fn resolve_plain_dns(server: &str, host: &str) -> io::Result<std::net::Ipv4Addr> {
+    let txid: u16 = 0x1234;
+    let mut pkt = Vec::with_capacity(512);
+    pkt.extend_from_slice(&txid.to_be_bytes());
+    pkt.extend_from_slice(&[0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    for label in host.split('.') { pkt.push(label.len() as u8); pkt.extend_from_slice(label.as_bytes()); }
+    pkt.push(0); pkt.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
+
+    let sock = UdpSocket::bind("0.0.0.0:0")?;
+    sock.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+    sock.send_to(&pkt, format!("{server}:53"))?;
+
+    let mut buf = [0u8; 1024];
+    let (n, _) = sock.recv_from(&mut buf)?;
+    let resp = &buf[..n];
+    if resp.len() < 12 || u16::from_be_bytes([resp[0], resp[1]]) != txid {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "bad DNS"));
+    }
+    let ancount = u16::from_be_bytes([resp[6], resp[7]]) as usize;
+    let mut p = skip_name(resp, 12)? + 4;
+    for _ in 0..ancount {
+        p = skip_name(resp, p)?;
+        if p + 10 > resp.len() { break; }
+        let t = u16::from_be_bytes([resp[p], resp[p + 1]]);
+        let rl = u16::from_be_bytes([resp[p + 8], resp[p + 9]]) as usize;
+        p += 10;
+        if t == 1 && rl == 4 && p + 4 <= resp.len() {
+            return Ok(std::net::Ipv4Addr::new(resp[p], resp[p+1], resp[p+2], resp[p+3]));
+        }
+        p += rl;
+    }
+    Err(io::Error::new(io::ErrorKind::NotFound, "no A"))
+}
+
 fn grease_ech(ip: std::net::Ipv4Addr) -> io::Result<Vec<u8>> {
     let h = std::ffi::CString::new(ip.to_string()).unwrap();
     let s = std::ffi::CString::new(OUTER_SNI).unwrap();
     let (mut c, mut l): (*mut u8, usize) = (std::ptr::null_mut(), 0);
     let r = unsafe { ech_get_retry_config(h.as_ptr(), 443, s.as_ptr(), &mut c, &mut l) };
-    if r == 1 && !c.is_null() && l > 0 { let d = unsafe { std::slice::from_raw_parts(c, l).to_vec() }; unsafe { ech_free(c as *mut _) }; Ok(d) }
-    else { Err(io::Error::new(io::ErrorKind::Other, "GREASE failed")) }
+    if r == 1 && !c.is_null() && l > 0 {
+        let d = unsafe { std::slice::from_raw_parts(c, l).to_vec() }; unsafe { ech_free(c as *mut _) }; Ok(d)
+    } else { Err(io::Error::new(io::ErrorKind::Other, "GREASE failed")) }
 }
 
-// ============================= ECH backend =================================
+// ============================= ECH backend ==================================
 
 static INIT: std::sync::Once = std::sync::Once::new();
+
 fn connect_ech(host: &str, ip: std::net::Ipv4Addr, ecl: &[u8]) -> io::Result<openssl::ssl::SslStream<TcpStream>> {
     INIT.call_once(|| openssl::init());
     let mut ctx = openssl::ssl::SslContext::builder(openssl::ssl::SslMethod::tls_client()).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
@@ -167,12 +253,13 @@ fn connect_ech(host: &str, ip: std::net::Ipv4Addr, ecl: &[u8]) -> io::Result<ope
     println!("[ECH] {host} → {ip} status={s}");
     Ok(st)
 }
+
 fn open_backend(host: &str, cache: &EchCache) -> io::Result<openssl::ssl::SslStream<TcpStream>> {
     let ecl = cache.get_ech()?; let ip = cache.get_ip(host)?;
     match connect_ech(host, ip, &ecl) { Ok(s) => Ok(s), Err(e) => { cache.invalidate(); Err(e) } }
 }
 
-// ============================= MITM ========================================
+// ============================= MITM =========================================
 
 fn handle_mitm(client: &mut TcpStream, host: &str, cache: &EchCache, ps: &str, ca: &MitmCa) {
     let mut backend = match open_backend(host, cache) {
@@ -181,7 +268,6 @@ fn handle_mitm(client: &mut TcpStream, host: &str, cache: &EchCache, ps: &str, c
     let _ = client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n");
     let _ = client.flush();
 
-    // TLS handshake with browser
     let config = Arc::new(ca.server_config(host));
     let mut acceptor = rustls::server::Acceptor::default();
     let mut tcp = client.try_clone().unwrap();
@@ -196,20 +282,16 @@ fn handle_mitm(client: &mut TcpStream, host: &str, cache: &EchCache, ps: &str, c
                     Err(_) => return,
                 }
             }
-            Err((_, _)) => { return; }
+            Err((_, _)) => return,
         }
     };
-    let sni = {
-        let ch = accepted.client_hello();
-        ch.server_name().unwrap_or("(none)").to_string()
-    };
+    let sni = { let ch = accepted.client_hello(); ch.server_name().unwrap_or("(none)").to_string() };
     println!("[{ps}] MITM TLS: SNI={sni}");
     let mut browser_tls = match accepted.into_connection(config) {
-        Ok(c) => c,
-        Err((_, _)) => return,
+        Ok(c) => c, Err((_, _)) => return,
     };
     println!("[{ps}] MITM OK for {host}");
-    // Relay: browser TLS ↔ backend ECH
+
     client.set_nonblocking(true).ok();
     backend.get_ref().set_nonblocking(true).ok();
     {
@@ -236,7 +318,7 @@ fn handle_mitm(client: &mut TcpStream, host: &str, cache: &EchCache, ps: &str, c
     client.set_nonblocking(false).ok();
 }
 
-// ============================= Proxy handler ===============================
+// ============================= Proxy ========================================
 
 fn handle_client(mut client: TcpStream, cache: Arc<EchCache>, ca: Arc<MitmCa>) {
     let ps = client.peer_addr().map(|p| p.to_string()).unwrap_or_default();
@@ -288,7 +370,7 @@ fn handle_client(mut client: TcpStream, cache: Arc<EchCache>, ca: Arc<MitmCa>) {
     }
 }
 
-// ============================= Browser =====================================
+// ============================= Browser ======================================
 
 fn find_chrome() -> Option<String> {
     for c in &["C:/Program Files/Google/Chrome/Application/chrome.exe", "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe", "C:/Program Files/Microsoft/Edge/Application/msedge.exe"] {
@@ -296,32 +378,42 @@ fn find_chrome() -> Option<String> {
     }
     which::which("chrome").ok().or_else(|| which::which("msedge").ok()).map(|p| p.display().to_string())
 }
+
 fn launch_browser(chrome: &str, proxy: &str, url: &str) {
     let p = format!("{}/bangumi-proxy-chrome", std::env::temp_dir().display());
     println!("[browser] {chrome} proxy=http://{proxy} url={url}\n");
-    let _ = std::process::Command::new(chrome).args([format!("--proxy-server=http://{proxy}"), "--remote-debugging-port=9222".into(), "--no-first-run".into(), "--no-default-browser-check".into(), format!("--user-data-dir={p}"), "--ignore-certificate-errors".into(), url.into()]).spawn();
+    let _ = std::process::Command::new(chrome).args([
+        format!("--proxy-server=http://{proxy}"), "--remote-debugging-port=9222".into(),
+        "--no-first-run".into(), "--no-default-browser-check".into(), format!("--user-data-dir={p}"),
+        "--ignore-certificate-errors".into(), url.into(),
+    ]).spawn();
 }
 
-// ============================= main ========================================
+// ============================= main =========================================
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
     let addr = format!("127.0.0.1:{}", args.port);
     let ca = Arc::new(MitmCa::load_or_generate());
+
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║  bangumi-proxy — HTTP/HTTPS + ECH 绕过 GFW                  ║");
     println!("╠══════════════════════════════════════════════════════════════╣");
     println!("║  代理: http://{addr:<44}║");
     println!("║  站点: chii.in / lain.bgm.tv / bgm.tv                     ║");
+    println!("║  DNS:  {:<52} ║", args.dns);
     println!("║  MITM: 自签 CA，支持 HTTPS                                  ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
-    let cache = Arc::new(EchCache::new());
+
+    let cache = Arc::new(EchCache::new(args.dns.clone()));
     let listener = TcpListener::bind(&addr)?;
     println!("[proxy] Listening on {addr}\n");
+
     if args.browser {
         let chrome = args.chrome.clone().or_else(find_chrome).unwrap_or_else(|| { eprintln!("[browser] Chrome not found"); std::process::exit(1); });
         launch_browser(&chrome, &addr, &args.url);
     } else { println!("Tip: use -b to auto-launch Chrome\n"); }
+
     for stream in listener.incoming() {
         if let Ok(client) = stream {
             let (cache, ca) = (Arc::clone(&cache), Arc::clone(&ca));
