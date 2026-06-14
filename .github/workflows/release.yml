@@ -1,0 +1,121 @@
+name: Build & Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  OPENSSL_VER: "4.0.1"
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache OpenSSL
+        id: cache-openssl
+        uses: actions/cache@v4
+        with:
+          path: /opt/openssl-4.0
+          key: openssl-${{ env.OPENSSL_VER }}-linux-x64
+
+      - name: Build OpenSSL from source
+        if: steps.cache-openssl.outputs.cache-hit != 'true'
+        run: |
+          curl -sL "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VER}/openssl-${OPENSSL_VER}.tar.gz" | tar xz -C /tmp
+          cd /tmp/openssl-${OPENSSL_VER}
+          ./config --prefix=/opt/openssl-4.0 --openssldir=/opt/openssl-4.0/ssl shared
+          make -j$(nproc)
+          sudo make install_sw
+
+      - name: Build bangumi-proxy
+        run: |
+          export OPENSSL_DIR=/opt/openssl-4.0
+          export OPENSSL_LIB_DIR=/opt/openssl-4.0/lib64
+          export OPENSSL_INCLUDE_DIR=/opt/openssl-4.0/include
+          cargo build --release
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/bangumi-proxy dist/
+          cp ca.pem ca-key.pem dist/
+          tar czf "bangumi-proxy-${GITHUB_REF_NAME}-linux-x86_64.tar.gz" -C dist .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: bangumi-proxy-*-linux-x86_64.tar.gz
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache OpenSSL
+        id: cache-openssl
+        uses: actions/cache@v4
+        with:
+          path: C:\openssl-4.0
+          key: openssl-${{ env.OPENSSL_VER }}-windows-x64
+
+      - name: Build OpenSSL from source
+        if: steps.cache-openssl.outputs.cache-hit != 'true'
+        shell: cmd
+        run: |
+          curl -sL "https://github.com/openssl/openssl/releases/download/openssl-%OPENSSL_VER%/openssl-%OPENSSL_VER%.tar.gz" -o openssl.tar.gz
+          tar xzf openssl.tar.gz
+          cd openssl-%OPENSSL_VER%
+          perl Configure VC-WIN64A --prefix=C:\openssl-4.0 --openssldir=C:\openssl-4.0\ssl
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          nmake
+          nmake install_sw
+
+      - name: Build bangumi-proxy
+        shell: cmd
+        run: |
+          set OPENSSL_DIR=C:\openssl-4.0
+          set OPENSSL_LIB_DIR=C:\openssl-4.0\lib
+          set OPENSSL_INCLUDE_DIR=C:\openssl-4.0\include
+          cargo build --release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          mkdir dist
+          Copy-Item target\release\bangumi-proxy.exe dist\
+          Copy-Item ca.pem, ca-key.pem dist\
+          Compress-Archive -Path dist\* -DestinationPath "bangumi-proxy-${env:GITHUB_REF_NAME}-windows-x86_64.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: bangumi-proxy-*-windows-x86_64.zip
+
+  release:
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
