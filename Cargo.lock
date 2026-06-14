@@ -62,6 +62,7 @@ dependencies = [
  "openssl",
  "openssl-sys",
  "parking_lot",
+ "pkg-config",
  "rcgen",
  "rustls",
  "rustls-pemfile",

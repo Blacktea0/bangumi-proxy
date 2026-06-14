@@ -5,13 +5,16 @@ use std::thread;
 
 use clap::Parser;
 use foreign_types_shared::ForeignType;
+#[cfg(has_ech)]
 use foreign_types_shared::ForeignTypeRef;
 use parking_lot::Mutex;
 
+#[cfg(has_ech)]
 unsafe extern "C" {
     fn ech_get_retry_config(host: *const std::os::raw::c_char, port: std::os::raw::c_int, outer_sni: *const std::os::raw::c_char, out_cfg: *mut *mut u8, out_len: *mut usize) -> std::os::raw::c_int;
     fn ech_free(p: *mut std::os::raw::c_void);
 }
+#[cfg(has_ech)]
 mod ffi {
     use std::os::raw::{c_char, c_int};
     unsafe extern "C" {
@@ -21,6 +24,7 @@ mod ffi {
     }
 }
 
+#[cfg(has_ech)]
 const OUTER_SNI: &str = "cloudflare-ech.com";
 const TARGETS: &[&str] = &["chii.in", "lain.bgm.tv", "bgm.tv", "next.bgm.tv"];
 const CF_DOH_IP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(104, 16, 248, 249);
@@ -223,6 +227,7 @@ fn system_dns(host: &str) -> io::Result<std::net::Ipv4Addr> {
     // Last resort: OS resolver
     format!("{host}:443").to_socket_addrs()?.find(|a| a.is_ipv4()).map(|a| match a.ip() { std::net::IpAddr::V4(v) => v, _ => unreachable!() }).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no A"))
 }
+#[cfg(has_ech)]
 fn grease_ech(ip: std::net::Ipv4Addr) -> io::Result<Vec<u8>> {
     let h = std::ffi::CString::new(ip.to_string()).unwrap(); let s = std::ffi::CString::new(OUTER_SNI).unwrap();
     let (mut c, mut l): (*mut u8, usize) = (std::ptr::null_mut(), 0);
@@ -230,10 +235,15 @@ fn grease_ech(ip: std::net::Ipv4Addr) -> io::Result<Vec<u8>> {
     if r == 1 && !c.is_null() && l > 0 { let d = unsafe { std::slice::from_raw_parts(c, l).to_vec() }; unsafe { ech_free(c as *mut _) }; Ok(d) }
     else { Err(io::Error::new(io::ErrorKind::Other, "GREASE failed")) }
 }
+#[cfg(no_ech)]
+fn grease_ech(_ip: std::net::Ipv4Addr) -> io::Result<Vec<u8>> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "ECH not available: build with OpenSSL 4.0-dev for ECH support"))
+}
 
 // ============================= ECH backend ==================================
 
 static INIT: std::sync::Once = std::sync::Once::new();
+#[cfg(has_ech)]
 fn connect_ech(host: &str, ip: std::net::Ipv4Addr, ecl: &[u8]) -> io::Result<openssl::ssl::SslStream<TcpStream>> {
     INIT.call_once(|| openssl::init());
     let mut ctx = openssl::ssl::SslContext::builder(openssl::ssl::SslMethod::tls_client()).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
@@ -249,6 +259,10 @@ fn connect_ech(host: &str, ip: std::net::Ipv4Addr, ecl: &[u8]) -> io::Result<ope
     let s = unsafe { ffi::SSL_ech_get1_status(st.ssl().as_ptr(), std::ptr::null_mut(), std::ptr::null_mut()) };
     println!("[ECH] {host} → {ip} status={s}");
     Ok(st)
+}
+#[cfg(no_ech)]
+fn connect_ech(_host: &str, _ip: std::net::Ipv4Addr, _ecl: &[u8]) -> io::Result<openssl::ssl::SslStream<TcpStream>> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "ECH not available"))
 }
 /// Direct TLS connection (no ECH) for non-Cloudflare domains.
 fn connect_direct(host: &str) -> io::Result<openssl::ssl::SslStream<TcpStream>> {
@@ -418,10 +432,24 @@ fn handle_client(mut client: TcpStream, cache: Arc<EchCache>, ca: Arc<MitmCa>) {
 // ============================= Browser ======================================
 
 fn find_chrome() -> Option<String> {
-    for c in &["C:/Program Files/Google/Chrome/Application/chrome.exe", "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe", "C:/Program Files/Microsoft/Edge/Application/msedge.exe"] {
-        if std::path::Path::new(c).exists() { return Some(c.to_string()); }
+    #[cfg(target_os = "windows")]
+    {
+        for c in &["C:/Program Files/Google/Chrome/Application/chrome.exe", "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe", "C:/Program Files/Microsoft/Edge/Application/msedge.exe"] {
+            if std::path::Path::new(c).exists() { return Some(c.to_string()); }
+        }
     }
-    which::which("chrome").ok().or_else(|| which::which("msedge").ok()).map(|p| p.display().to_string())
+    #[cfg(target_os = "linux")]
+    {
+        for c in &["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable", "/snap/bin/chromium"] {
+            if std::path::Path::new(c).exists() { return Some(c.to_string()); }
+        }
+    }
+    which::which("google-chrome").ok()
+        .or_else(|| which::which("chromium").ok())
+        .or_else(|| which::which("chromium-browser").ok())
+        .or_else(|| which::which("microsoft-edge").ok())
+        .or_else(|| which::which("msedge").ok())
+        .map(|p| p.display().to_string())
 }
 fn launch_browser(chrome: &str, proxy: &str, url: &str) {
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();

@@ -1,4 +1,5 @@
 #include <openssl/ssl.h>
+#include <openssl/ech.h>
 #include <openssl/bio.h>
 #include <openssl/err.h>
 #include <string.h>
@@ -16,7 +17,7 @@ int ech_get_retry_config(
 
     SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION);
     SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
-    SSL_CTX_set_options(ctx, (uint64_t)1 << 37); /* SSL_OP_ECH_GREASE */
+    SSL_CTX_set_options(ctx, SSL_OP_ECH_GREASE);
 
     SSL *ssl = SSL_new(ctx);
     if (!ssl) { SSL_CTX_free(ctx); return 0; }
