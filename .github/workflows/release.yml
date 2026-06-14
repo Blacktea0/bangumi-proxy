@@ -13,6 +13,7 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
       - name: Cache Conan packages
         uses: actions/cache@v4
         with:
@@ -38,7 +39,7 @@ jobs:
 
       - name: Build bangumi-proxy
         run: |
-          CONAN_PKG=$(find ~/.conan2/p -name "ech.h" -path "*/openssl/*" 2>/dev/null | head -1 | xargs dirname | xargs dirname)
+          CONAN_PKG=$(find ~/.conan2/p -path "*/p/include/openssl/ech.h" 2>/dev/null | head -1 | sed 's|/include/openssl/ech.h||')
           echo "CONAN_PKG=$CONAN_PKG"
           export OPENSSL_DIR=$CONAN_PKG
           export OPENSSL_INCLUDE_DIR=$CONAN_PKG/include
@@ -68,6 +69,7 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
       - name: Cache Conan packages
         uses: actions/cache@v4
         with:
@@ -96,8 +98,7 @@ jobs:
         shell: pwsh
         run: |
           $ech = Get-ChildItem -Path "$env:USERPROFILE\.conan2\p" -Recurse -Filter "ech.h" -ErrorAction SilentlyContinue | Where-Object { $_.DirectoryName -match "openssl" } | Select-Object -First 1
-          if (-not $ech) { $ech = Get-ChildItem -Path conan -Recurse -Filter "ech.h" -ErrorAction SilentlyContinue | Select-Object -First 1 }
-          $CONAN_PKG = $ech.Directory.Parent.FullName
+          $CONAN_PKG = $ech.Directory.Parent.Parent.FullName
           echo "CONAN_PKG=$CONAN_PKG"
           $env:OPENSSL_DIR = $CONAN_PKG
           $env:OPENSSL_INCLUDE_DIR = "$CONAN_PKG\include"
