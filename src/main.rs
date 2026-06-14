@@ -206,9 +206,44 @@ fn connect_ech(host: &str, ip: std::net::Ipv4Addr, ecl: &[u8]) -> io::Result<ope
     println!("[ECH] {host} → {ip} status={s}");
     Ok(st)
 }
+/// Direct TLS connection (no ECH) for non-Cloudflare domains.
+fn connect_direct(host: &str) -> io::Result<openssl::ssl::SslStream<TcpStream>> {
+    INIT.call_once(|| openssl::init());
+    let mut ctx = openssl::ssl::SslContext::builder(openssl::ssl::SslMethod::tls_client()).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    ctx.set_verify(openssl::ssl::SslVerifyMode::NONE);
+    let ctx = ctx.build();
+    let ssl = openssl::ssl::Ssl::new(&ctx).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    let host_c = std::ffi::CString::new(host).unwrap();
+    unsafe { openssl_sys::SSL_set_tlsext_host_name(ssl.as_ptr(), host_c.as_ptr() as *mut _) };
+    let tcp = TcpStream::connect(format!("{host}:443"))?;
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(15)))?;
+    tcp.set_write_timeout(Some(std::time::Duration::from_secs(15)))?;
+    let st = ssl.connect(tcp).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    println!("[TLS] {host} (direct)");
+    Ok(st)
+}
+
 fn open_backend(host: &str, cache: &EchCache) -> io::Result<openssl::ssl::SslStream<TcpStream>> {
-    let ecl = cache.get_ech()?; let ip = cache.get_ip(host)?;
-    match connect_ech(host, ip, &ecl) { Ok(s) => Ok(s), Err(e) => { cache.invalidate(); Err(e) } }
+    // Target domains: use ECH. Others: try ECH first, fall back to direct.
+    if is_target(host) {
+        let ecl = cache.get_ech()?; let ip = cache.get_ip(host)?;
+        return match connect_ech(host, ip, &ecl) { Ok(s) => Ok(s), Err(e) => { cache.invalidate(); Err(e) } };
+    }
+    // Non-target: try ECH (if DNS gives us a Cloudflare IP), then direct
+    match cache.get_ip(host) {
+        Ok(ip) if is_cloudflare_ip(ip) => {
+            if let Ok(ecl) = cache.get_ech() {
+                if let Ok(s) = connect_ech(host, ip, &ecl) { return Ok(s); }
+            }
+        }
+        _ => {}
+    }
+    connect_direct(host)
+}
+
+fn is_cloudflare_ip(ip: std::net::Ipv4Addr) -> bool {
+    let o = ip.octets();
+    o[0] == 104 || o[0] == 172 && o[1] >= 64 && o[1] <= 95 || o[0] == 162 && o[1] == 159 || o[0] == 188 && o[1] == 114
 }
 
 // ============================= MITM =========================================
@@ -258,7 +293,6 @@ fn handle_client(mut client: TcpStream, cache: Arc<EchCache>, ca: Arc<MitmCa>) {
         let target = req_line.split_whitespace().nth(1).unwrap_or("");
         let (host, _) = target.rsplit_once(':').map(|(h, p)| (h, p.parse().unwrap_or(443))).unwrap_or((target, 443));
         println!("[{ps}] CONNECT {target}");
-        if !is_target(host) { let _ = client.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n"); return; }
         handle_mitm(&mut client, host, &cache, &ps, &ca);
     } else {
         let parts: Vec<&str> = req_line.split_whitespace().collect();
@@ -267,7 +301,7 @@ fn handle_client(mut client: TcpStream, cache: Arc<EchCache>, ca: Arc<MitmCa>) {
         let host = if uri.starts_with("http://") { uri[7..].split('/').next().unwrap_or("").split(':').next().unwrap_or("") } else { headers.iter().find(|h| h.to_lowercase().starts_with("host:")).and_then(|h| h.split(':').nth(1)).map(str::trim).unwrap_or("") };
         let path = if uri.starts_with("http://") { match &uri[7..].find('/') { Some(i) => &uri[7+i..], None => "/" } } else { uri };
         println!("[{ps}] {method} {path} (host={host})");
-        if !is_target(host) { let _ = client.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n"); return; }
+        if !is_target(host) { println!("[{ps}] {host} (direct)"); }
         let cl: usize = headers.iter().find(|h| h.to_lowercase().starts_with("content-length:")).and_then(|h| h.split(':').nth(1)).and_then(|v| v.trim().parse().ok()).unwrap_or(0);
         let mut body = vec![0u8; cl]; if cl > 0 { let _ = reader.read_exact(&mut body); }
         let mut backend = match open_backend(host, &cache) { Ok(s) => s, Err(e) => { eprintln!("[err] {e}"); return; } };
