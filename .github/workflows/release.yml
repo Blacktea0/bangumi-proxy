@@ -14,27 +14,24 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache OpenSSL
-        id: cache-openssl
-        uses: actions/cache@v4
-        with:
-          path: /opt/openssl-4.0
-          key: openssl-4.0.1-linux-x64-v2
+      - name: Install Conan
+        run: pip install conan
 
-      - name: Build OpenSSL 4.0 from source
-        if: steps.cache-openssl.outputs.cache-hit != 'true'
+      - name: Install OpenSSL 4.0 via Conan
         run: |
-          curl -sL "https://github.com/openssl/openssl/releases/download/openssl-4.0.1/openssl-4.0.1.tar.gz" | tar xz -C /tmp
-          cd /tmp/openssl-4.0.1
-          ./config --prefix=/opt/openssl-4.0 --openssldir=/opt/openssl-4.0/ssl shared
-          make -j$(nproc)
-          sudo make install_sw
+          conan profile detect
+          conan install --requires=openssl/4.0.1 -of=conan --build=missing -s build_type=Release
 
       - name: Build bangumi-proxy
         run: |
-          export OPENSSL_DIR=/opt/openssl-4.0
-          export OPENSSL_LIB_DIR=/opt/openssl-4.0/lib64
-          export OPENSSL_INCLUDE_DIR=/opt/openssl-4.0/include
+          OPENSSL_DIR=$(find conan -maxdepth 4 -name "openssl" -type d | head -1)
+          export OPENSSL_DIR
+          export OPENSSL_INCLUDE_DIR="$OPENSSL_DIR/include"
+          export OPENSSL_LIB_DIR=$(find conan -path "*/lib/libssl.so" -exec dirname {} \; | head -1)
+          echo "OPENSSL_DIR=$OPENSSL_DIR"
+          echo "OPENSSL_INCLUDE_DIR=$OPENSSL_INCLUDE_DIR"
+          echo "OPENSSL_LIB_DIR=$OPENSSL_LIB_DIR"
+          ls "$OPENSSL_INCLUDE_DIR/openssl/ech.h" && echo "ech.h found!"
           cargo build --release
 
       - name: Package
@@ -42,9 +39,9 @@ jobs:
           mkdir -p dist
           cp target/release/bangumi-proxy dist/
           cp ca.pem ca-key.pem dist/
-          # Bundle OpenSSL 4.0 shared libs
-          cp /opt/openssl-4.0/lib64/libssl.so.4 dist/ 2>/dev/null || true
-          cp /opt/openssl-4.0/lib64/libcrypto.so.3 dist/ 2>/dev/null || true
+          OPENSSL_LIB_DIR=$(find conan -path "*/lib/libssl.so" -exec dirname {} \; | head -1)
+          cp "$OPENSSL_LIB_DIR/libssl.so.4" dist/ 2>/dev/null || true
+          cp "$OPENSSL_LIB_DIR/libcrypto.so.3" dist/ 2>/dev/null || true
           tar czf "bangumi-proxy-${GITHUB_REF_NAME}-linux-x86_64.tar.gz" -C dist .
 
       - name: Upload artifact
@@ -61,33 +58,25 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache OpenSSL
-        id: cache-openssl
-        uses: actions/cache@v4
-        with:
-          path: C:\openssl-4.0
-          key: openssl-4.0.1-windows-firedaemon-v2
+      - name: Install Conan
+        run: pip install conan
 
-      - name: Download FireDaemon OpenSSL 4.0 ZIP
-        if: steps.cache-openssl.outputs.cache-hit != 'true'
+      - name: Install OpenSSL 4.0 via Conan
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://www.firedaemon.com/download-firedaemon-openssl-4-0-zip" -OutFile "openssl-fd.zip"
-          Expand-Archive -Path "openssl-fd.zip" -DestinationPath "openssl-fd"
-          # Find the x64 directory and copy to C:\openssl-4.0
-          $x64 = Get-ChildItem -Path "openssl-fd" -Recurse -Directory | Where-Object { $_.Name -eq "x64" } | Select-Object -First 1
-          Copy-Item -Path $x64.FullName -Destination "C:\openssl-4.0" -Recurse
-          # Copy ssl dir if present
-          $ssl = Get-ChildItem -Path "openssl-fd" -Recurse -Directory | Where-Object { $_.Name -eq "ssl" } | Select-Object -First 1
-          if ($ssl) { Copy-Item -Path $ssl.FullName -Destination "C:\openssl-4.0\ssl" -Recurse }
-          Get-ChildItem "C:\openssl-4.0" -Recurse -Name | Select-Object -First 30
+          conan profile detect
+          conan install --requires=openssl/4.0.1 -of=conan --build=missing -s build_type=Release
 
       - name: Build bangumi-proxy
         shell: pwsh
         run: |
-          $env:OPENSSL_DIR = "C:\openssl-4.0"
-          $env:OPENSSL_LIB_DIR = "C:\openssl-4.0\lib"
-          $env:OPENSSL_INCLUDE_DIR = "C:\openssl-4.0\include"
+          $opensslDir = Get-ChildItem -Path conan -Recurse -Directory -Filter "openssl" | Where-Object { Test-Path "$($_.FullName)\include" } | Select-Object -First 1
+          $env:OPENSSL_DIR = $opensslDir.FullName
+          $env:OPENSSL_INCLUDE_DIR = "$($opensslDir.FullName)\include"
+          $env:OPENSSL_LIB_DIR = (Get-ChildItem -Path conan -Recurse -Filter "libssl.lib" | Select-Object -First 1).DirectoryName
+          echo "OPENSSL_DIR=$env:OPENSSL_DIR"
+          echo "OPENSSL_INCLUDE_DIR=$env:OPENSSL_INCLUDE_DIR"
+          echo "OPENSSL_LIB_DIR=$env:OPENSSL_LIB_DIR"
           cargo build --release
 
       - name: Package
@@ -96,10 +85,8 @@ jobs:
           mkdir dist
           Copy-Item target\release\bangumi-proxy.exe dist\
           Copy-Item ca.pem, ca-key.pem dist\
-          # Bundle OpenSSL DLLs
-          Copy-Item C:\openssl-4.0\bin\libssl-4-x64.dll dist\ -ErrorAction SilentlyContinue
-          Copy-Item C:\openssl-4.0\bin\libcrypto-3-x64.dll dist\ -ErrorAction SilentlyContinue
-          Copy-Item C:\openssl-4.0\bin\libcrypto-4-x64.dll dist\ -ErrorAction SilentlyContinue
+          $binDir = Get-ChildItem -Path conan -Recurse -Filter "libssl*.dll" | Select-Object -First 1 -ExpandProperty DirectoryName
+          if ($binDir) { Copy-Item "$binDir\*.dll" dist\ }
           Compress-Archive -Path dist\* -DestinationPath "bangumi-proxy-${env:GITHUB_REF_NAME}-windows-x86_64.zip"
 
       - name: Upload artifact
