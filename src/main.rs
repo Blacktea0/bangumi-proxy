@@ -246,8 +246,40 @@ fn is_cloudflare_ip(ip: std::net::Ipv4Addr) -> bool {
     o[0] == 104 || o[0] == 172 && o[1] >= 64 && o[1] <= 95 || o[0] == 162 && o[1] == 159 || o[0] == 188 && o[1] == 114
 }
 
-// ============================= MITM =========================================
+fn handle_connect(client: &mut TcpStream, host: &str, cache: &EchCache, ps: &str, ca: &MitmCa) {
+    if is_target(host) {
+        // Target domain: MITM TLS + ECH
+        handle_mitm(client, host, cache, ps, ca);
+    } else {
+        // Other domain: raw tunnel (no MITM, no ECH)
+        handle_tunnel(client, host, ps);
+    }
+}
 
+/// Raw TCP tunnel — relay bytes between browser and remote server without decryption.
+fn handle_tunnel(client: &mut TcpStream, host: &str, ps: &str) {
+    let mut remote = match TcpStream::connect(format!("{host}:443")) {
+        Ok(s) => s,
+        Err(e) => { eprintln!("[{ps}] tunnel {host}: {e}"); return; }
+    };
+    remote.set_read_timeout(Some(std::time::Duration::from_secs(60))).ok();
+    remote.set_write_timeout(Some(std::time::Duration::from_secs(60))).ok();
+    let _ = client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n");
+    let _ = client.flush();
+    println!("[{ps}] TUNNEL {host}:443");
+
+    client.set_nonblocking(true).ok();
+    remote.set_nonblocking(true).ok();
+    loop {
+        let mut buf = [0u8; 8192];
+        match client.read(&mut buf) { Ok(0) => break, Ok(n) => { let _ = remote.write_all(&buf[..n]); } Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {} Err(_) => break }
+        match remote.read(&mut buf) { Ok(0) => break, Ok(n) => { let _ = client.write_all(&buf[..n]); } Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {} Err(_) => break }
+        thread::sleep(std::time::Duration::from_millis(1));
+    }
+    client.set_nonblocking(false).ok();
+}
+
+/// MITM TLS — decrypt browser TLS, forward via ECH to Cloudflare backend.
 fn handle_mitm(client: &mut TcpStream, host: &str, cache: &EchCache, ps: &str, ca: &MitmCa) {
     let mut backend = match open_backend(host, cache) { Ok(s) => s, Err(e) => { eprintln!("[{ps}] backend: {e}"); return; } };
     let _ = client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n"); let _ = client.flush();
@@ -293,10 +325,9 @@ fn handle_client(mut client: TcpStream, cache: Arc<EchCache>, ca: Arc<MitmCa>) {
         let target = req_line.split_whitespace().nth(1).unwrap_or("");
         let (host, _) = target.rsplit_once(':').map(|(h, p)| (h, p.parse().unwrap_or(443))).unwrap_or((target, 443));
         println!("[{ps}] CONNECT {target}");
-        handle_mitm(&mut client, host, &cache, &ps, &ca);
+        handle_connect(&mut client, host, &cache, &ps, &ca);
     } else {
         let parts: Vec<&str> = req_line.split_whitespace().collect();
-        if parts.len() < 3 { return; }
         let (method, uri) = (parts[0], parts[1]);
         let host = if uri.starts_with("http://") { uri[7..].split('/').next().unwrap_or("").split(':').next().unwrap_or("") } else { headers.iter().find(|h| h.to_lowercase().starts_with("host:")).and_then(|h| h.split(':').nth(1)).map(str::trim).unwrap_or("") };
         let path = if uri.starts_with("http://") { match &uri[7..].find('/') { Some(i) => &uri[7+i..], None => "/" } } else { uri };
