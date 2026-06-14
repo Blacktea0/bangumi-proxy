@@ -8,6 +8,8 @@ openssl-sys = "0.9"
 openssl = "0.10"
 foreign-types-shared = "0.1"
 parking_lot = "0.12"
+clap = { version = "4", features = ["derive"] }
+which = "7"
 
 [build-dependencies]
 cc = "1"

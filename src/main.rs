@@ -3,6 +3,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
 
+use clap::Parser;
 use foreign_types_shared::ForeignType;
 use foreign_types_shared::ForeignTypeRef;
 use parking_lot::Mutex;
@@ -25,9 +26,28 @@ mod ffi {
 }
 
 const OUTER_SNI: &str = "cloudflare-ech.com";
-const PROXY_ADDR: &str = "127.0.0.1:8080";
 const TARGETS: &[&str] = &["chii.in", "lain.bgm.tv", "bgm.tv"];
-// bgm.tv 不在 Cloudflare 上，但保留在列表中以便未来切换 CDN 后自动生效
+
+/// bangumi-proxy — HTTP 代理 + ECH 绕过 GFW
+#[derive(Parser, Debug)]
+#[command(name = "bangumi-proxy", version, about)]
+struct Args {
+    /// 监听端口
+    #[arg(short, long, default_value_t = 8080)]
+    port: u16,
+
+    /// 启动浏览器并自动配置代理
+    #[arg(short, long)]
+    browser: bool,
+
+    /// 浏览器启动后打开的 URL
+    #[arg(short, long, default_value = "http://chii.in")]
+    url: String,
+
+    /// Chrome 可执行文件路径（留空自动检测）
+    #[arg(long)]
+    chrome: Option<String>,
+}
 
 fn is_target(host: &str) -> bool {
     TARGETS.iter().any(|&t| host == t || host.ends_with(&format!(".{t}")))
@@ -266,21 +286,69 @@ fn relay(client: &mut TcpStream, backend: &mut openssl::ssl::SslStream<TcpStream
     }
     client.set_nonblocking(false).ok();
 }
+fn find_chrome() -> Option<String> {
+    let candidates = [
+        "C:/Program Files/Google/Chrome/Application/chrome.exe",
+        "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
+        "C:/Program Files/Microsoft/Edge/Application/msedge.exe",
+    ];
+    for c in &candidates {
+        if std::path::Path::new(c).exists() {
+            return Some(c.to_string());
+        }
+    }
+    // Try PATH
+    which::which("chrome").ok().or_else(|| which::which("msedge").ok())
+        .map(|p| p.display().to_string())
+}
+
+fn launch_browser(chrome_path: &str, proxy_addr: &str, url: &str) {
+    let profile_dir = format!("{}/bangumi-proxy-chrome", std::env::temp_dir().display());
+    let args = vec![
+        format!("--proxy-server=http://{proxy_addr}"),
+        "--remote-debugging-port=9222".to_string(),
+        "--no-first-run".to_string(),
+        "--no-default-browser-check".to_string(),
+        format!("--user-data-dir={profile_dir}"),
+        url.to_string(),
+    ];
+    println!("[browser] Launching {chrome_path}");
+    println!("[browser] Proxy: http://{proxy_addr}");
+    println!("[browser] URL:   {url}\n");
+    match std::process::Command::new(chrome_path).args(&args).spawn() {
+        Ok(_) => {}
+        Err(e) => eprintln!("[browser] Failed to launch: {e}"),
+    }
+}
 
 fn main() -> io::Result<()> {
+    let args = Args::parse();
+    let proxy_addr = format!("127.0.0.1:{}", args.port);
+
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║  bangumi-proxy — HTTP 代理 + ECH 绕过 GFW                    ║");
     println!("╠══════════════════════════════════════════════════════════════╣");
-    println!("║  代理:  http://{PROXY_ADDR:<42} ║");
+    println!("║  代理:  http://{proxy_addr:<42} ║");
     println!("║  站点:  chii.in / lain.bgm.tv / bgm.tv                    ║");
     println!("║  SNI:   {OUTER_SNI} (外层, 绕过 GFW)                   ║");
-    println!("║  用法:  浏览器 HTTP 代理 → 127.0.0.1:8080                  ║");
-    println!("║         访问 http://chii.in / http://bgm.tv 等             ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
 
     let cache = Arc::new(EchCache::new());
-    let listener = TcpListener::bind(PROXY_ADDR)?;
-    println!("[proxy] Listening on {PROXY_ADDR}\n");
+    let listener = TcpListener::bind(&proxy_addr)?;
+    println!("[proxy] Listening on {proxy_addr}\n");
+
+    // Launch browser if requested
+    if args.browser {
+        let chrome = args.chrome.clone()
+            .or_else(find_chrome)
+            .unwrap_or_else(|| {
+                eprintln!("[browser] Chrome not found. Use --chrome <path> to specify.");
+                std::process::exit(1);
+            });
+        launch_browser(&chrome, &proxy_addr, &args.url);
+    } else {
+        println!("Tip: use --browser (-b) to auto-launch Chrome with proxy\n");
+    }
 
     for stream in listener.incoming() {
         if let Ok(client) = stream {
