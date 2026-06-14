@@ -1,5 +1,5 @@
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::Arc;
 use std::thread;
 
@@ -134,8 +134,19 @@ impl EchCache {
             let j = doh_json(doh_host, &format!("{path}?name={host}&type=A"))?;
             parse_a(&j).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no A"))
         } else {
-            // Plain DNS (IP address)
-            resolve_plain_dns(&self.dns, host)
+            // Plain DNS — resolve server hostname to IP first
+            let server_ip = if self.dns.parse::<std::net::Ipv4Addr>().is_ok() {
+                self.dns.clone()
+            } else {
+                // Resolve DNS server hostname via system DNS
+                format!("{}:53", self.dns)
+                    .to_socket_addrs()
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
+                    .find(|a| a.is_ipv4())
+                    .map(|a| a.ip().to_string())
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "can't resolve DNS server"))?
+            };
+            resolve_plain_dns(&server_ip, host)
         }
     }
 
