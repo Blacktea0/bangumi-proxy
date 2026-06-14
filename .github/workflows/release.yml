@@ -13,6 +13,11 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Cache Conan packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2
+          key: conan-openssl-4.0.1-linux-v1
 
       - name: Install Conan
         run: pip install conan
@@ -33,20 +38,14 @@ jobs:
 
       - name: Build bangumi-proxy
         run: |
-          CONAN_BASE=$(find ~/.conan2/p -path "*/openssl/4.0.1" -type d 2>/dev/null | head -1)
-          if [ -z "$CONAN_BASE" ]; then
-            CONAN_BASE=$(find conan -name "openssl" -type d 2>/dev/null | head -1)
-          fi
-          echo "CONAN_BASE=$CONAN_BASE"
-          export OPENSSL_DIR=$CONAN_BASE
-          export OPENSSL_INCLUDE_DIR=$(find $CONAN_BASE -name "ech.h" -path "*/openssl/*" -exec dirname {} \; 2>/dev/null | head -1 | sed 's|/openssl||')
-          if [ -z "$OPENSSL_INCLUDE_DIR" ]; then
-            export OPENSSL_INCLUDE_DIR=$(find $CONAN_BASE -name "ssl.h" -path "*/openssl/*" -exec dirname {} \; 2>/dev/null | head -1 | sed 's|/openssl||')
-          fi
-          export OPENSSL_LIB_DIR=$(find $CONAN_BASE -name "libssl.so*" -exec dirname {} \; 2>/dev/null | head -1)
-          echo "OPENSSL_INCLUDE_DIR=$OPENSSL_INCLUDE_DIR"
-          echo "OPENSSL_LIB_DIR=$OPENSSL_LIB_DIR"
-          ls "$OPENSSL_INCLUDE_DIR/openssl/ech.h" 2>/dev/null && echo "✓ ech.h found" || echo "✗ ech.h NOT found"
+          CONAN_PKG=$(find ~/.conan2/p -name "ech.h" -path "*/openssl/*" 2>/dev/null | head -1 | xargs dirname | xargs dirname)
+          echo "CONAN_PKG=$CONAN_PKG"
+          export OPENSSL_DIR=$CONAN_PKG
+          export OPENSSL_INCLUDE_DIR=$CONAN_PKG/include
+          export OPENSSL_LIB_DIR=$CONAN_PKG/lib
+          export OPENSSL_STATIC=1
+          ls $OPENSSL_INCLUDE_DIR/openssl/ech.h && echo "✓ ech.h"
+          ls $OPENSSL_LIB_DIR/libssl.a && echo "✓ libssl.a"
           cargo build --release
 
       - name: Package
@@ -54,10 +53,6 @@ jobs:
           mkdir -p dist
           cp target/release/bangumi-proxy dist/
           cp ca.pem ca-key.pem dist/
-          CONAN_BASE=$(find ~/.conan2/p -path "*/openssl/4.0.1" -type d 2>/dev/null | head -1)
-          LIB_DIR=$(find $CONAN_BASE -name "libssl.so*" -exec dirname {} \; 2>/dev/null | head -1)
-          cp $LIB_DIR/libssl.so.4 dist/ 2>/dev/null || true
-          cp $LIB_DIR/libcrypto.so.3 dist/ 2>/dev/null || true
           tar czf "bangumi-proxy-${GITHUB_REF_NAME}-linux-x86_64.tar.gz" -C dist .
 
       - name: Upload artifact
@@ -73,6 +68,11 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Cache Conan packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2
+          key: conan-openssl-4.0.1-windows-v1
 
       - name: Install Conan
         run: pip install conan
@@ -95,17 +95,14 @@ jobs:
       - name: Build bangumi-proxy
         shell: pwsh
         run: |
-          $conanBase = Get-ChildItem -Path "$env:USERPROFILE\.conan2\p" -Recurse -Directory -Filter "openssl" -ErrorAction SilentlyContinue | Where-Object { Test-Path "$($_.FullName)\include" } | Select-Object -First 1
-          if (-not $conanBase) {
-            $conanBase = Get-ChildItem -Path conan -Recurse -Directory -Filter "openssl" -ErrorAction SilentlyContinue | Where-Object { Test-Path "$($_.FullName)\include" } | Select-Object -First 1
-          }
-          $env:OPENSSL_DIR = $conanBase.FullName
-          $env:OPENSSL_INCLUDE_DIR = "$($conanBase.FullName)\include"
-          $sslLib = Get-ChildItem -Path $conanBase.FullName -Recurse -Filter "libssl.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
-          $env:OPENSSL_LIB_DIR = $sslLib.DirectoryName
-          echo "OPENSSL_DIR=$env:OPENSSL_DIR"
-          echo "OPENSSL_INCLUDE_DIR=$env:OPENSSL_INCLUDE_DIR"
-          echo "OPENSSL_LIB_DIR=$env:OPENSSL_LIB_DIR"
+          $ech = Get-ChildItem -Path "$env:USERPROFILE\.conan2\p" -Recurse -Filter "ech.h" -ErrorAction SilentlyContinue | Where-Object { $_.DirectoryName -match "openssl" } | Select-Object -First 1
+          if (-not $ech) { $ech = Get-ChildItem -Path conan -Recurse -Filter "ech.h" -ErrorAction SilentlyContinue | Select-Object -First 1 }
+          $CONAN_PKG = $ech.Directory.Parent.FullName
+          echo "CONAN_PKG=$CONAN_PKG"
+          $env:OPENSSL_DIR = $CONAN_PKG
+          $env:OPENSSL_INCLUDE_DIR = "$CONAN_PKG\include"
+          $env:OPENSSL_LIB_DIR = "$CONAN_PKG\lib"
+          $env:OPENSSL_STATIC = "1"
           cargo build --release
 
       - name: Package
@@ -114,10 +111,6 @@ jobs:
           mkdir dist -Force
           Copy-Item target\release\bangumi-proxy.exe dist\
           Copy-Item ca.pem, ca-key.pem dist\
-          $conanBase = Get-ChildItem -Path "$env:USERPROFILE\.conan2\p" -Recurse -Directory -Filter "openssl" -ErrorAction SilentlyContinue | Where-Object { Test-Path "$($_.FullName)\include" } | Select-Object -First 1
-          if (-not $conanBase) { $conanBase = Get-ChildItem -Path conan -Recurse -Directory -Filter "openssl" | Where-Object { Test-Path "$($_.FullName)\include" } | Select-Object -First 1 }
-          $binDir = Get-ChildItem -Path $conanBase.FullName -Recurse -Filter "libssl*.dll" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty DirectoryName
-          if ($binDir) { Copy-Item "$binDir\*.dll" dist\ }
           Compress-Archive -Path dist\* -DestinationPath "bangumi-proxy-${env:GITHUB_REF_NAME}-windows-x86_64.zip"
 
       - name: Upload artifact
