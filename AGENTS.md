@@ -57,7 +57,7 @@ bangumi-proxy [OPTIONS]
 Options:
   -p, --port <PORT>        监听端口 [default: 8080]
   -b, --browser            启动浏览器并自动配置代理（自动检测，优先级：chrome > chromium > edge > firefox）
-  -u, --url <URL>          浏览器启动后打开的 URL [default: http://chii.in]
+  -u, --url <URL>          浏览器启动后打开的 URL [default: https://bgm.tv]
       --chrome [PATH]      使用 Chrome（可选指定路径）
       --chromium [PATH]    使用 Chromium（可选指定路径）
       --edge [PATH]        使用 Edge（可选指定路径）
@@ -74,11 +74,11 @@ Options:
 cargo run
 
 # Auto-detect and launch browser with proxy
-cargo run -- -b --url http://bgm.tv
+cargo run -- -b --url https://bgm.tv
 
 # Use specific browser (auto-detect path)
 cargo run -- --chrome
-cargo run -- --edge --url http://bgm.tv
+cargo run -- --edge --url https://bgm.tv
 cargo run -- --firefox
 
 # Use specific browser with custom path
@@ -95,17 +95,46 @@ cargo run -- --hosts ./my_hosts.txt
 cargo run -- --trust-ca
 
 # All options
-cargo run -- -b -p 9090 -u http://lain.bgm.tv --hosts ./hosts
+cargo run -- -b -p 9090 -u https://lain.bgm.tv --hosts ./hosts
 
 ## Development
 
-```bash
-# Build (requires OpenSSL 4.0 via scoop)
-set OPENSSL_DIR=%USERPROFILE%\scoop\apps\openssl\current
-set OPENSSL_LIB_DIR=%OPENSSL_DIR%\lib
-set OPENSSL_INCLUDE_DIR=%OPENSSL_DIR%\include
-cargo build
+### Prerequisites
 
-# Test
+- [Rust](https://rustup.rs/) (stable)
+- [Conan 2.x](https://conan.io/) (`pip install conan` or `pipx install conan`)
+- C compiler (MSVC on Windows, gcc/clang on Linux/macOS)
+
+### Build
+
+```bash
+# 1. Install OpenSSL 4.0 via Conan (first time only)
+conan profile detect --force
+# Linux/macOS:
+conan install conan --build=missing -s build_type=Release
+# Windows (needs static CRT to match Rust MSVC default):
+conan install conan --build=missing -s build_type=Release -s compiler.runtime=static
+
+# 2. Set OpenSSL environment variables
+# Linux/macOS:
+CONAN_PKG=$(find ~/.conan2/p -path "*/p/include/openssl/ech.h" 2>/dev/null | head -1 | sed 's|/include/openssl/ech.h||')
+export OPENSSL_DIR=$CONAN_PKG
+export OPENSSL_INCLUDE_DIR=$CONAN_PKG/include
+export OPENSSL_LIB_DIR=$CONAN_PKG/lib
+export OPENSSL_STATIC=1
+
+# Windows (PowerShell):
+$libFile = Get-ChildItem -Path "$env:USERPROFILE\.conan2\p" -Recurse -Filter "libssl.lib" -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match "\\p\\lib\\" } | Select-Object -First 1
+$CONAN_PKG = $libFile.Directory.Parent.FullName
+$env:OPENSSL_DIR = $CONAN_PKG
+$env:OPENSSL_INCLUDE_DIR = "$CONAN_PKG\include"
+$env:OPENSSL_LIB_DIR = $libFile.DirectoryName
+$env:OPENSSL_STATIC = "1"
+
+# 3. Build
+cargo build
+cargo build --release
+
+# 4. Test
 curl -x http://127.0.0.1:8080 http://chii.in/
 ```

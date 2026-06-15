@@ -49,7 +49,7 @@ fn parse_hosts(path: &str) -> std::collections::HashMap<String, std::net::Ipv4Ad
 struct Args {
     #[arg(short, long, default_value_t = 8080)] port: u16,
     #[arg(short, long)] browser: bool,
-    #[arg(short, long, default_value = "http://chii.in")] url: String,
+    #[arg(short, long, default_value = "https://bgm.tv")] url: String,
     /// 使用 Chrome（可选指定路径）
     #[arg(long, num_args = 0..=1, default_missing_value = "")] chrome: Option<Option<String>>,
     /// 使用 Chromium（可选指定路径）
@@ -660,6 +660,23 @@ fn launch_browser(kind: BrowserKind, exe: &str, proxy: &str, url: &str) {
         }
     }
 }
+
+/// Detect if the program was launched by double-clicking (GUI) vs from a terminal.
+/// On Windows, uses GetConsoleProcessList: if only 1 process is attached to the
+/// console, it was launched from Explorer (which creates a new console for the process).
+/// If 2+ processes, it was launched from an existing terminal (cmd, PowerShell, etc.).
+#[cfg(windows)]
+fn is_gui_launch() -> bool {
+    use std::mem::MaybeUninit;
+    extern "system" {
+        fn GetConsoleProcessList(lpdwProcessList: *mut u32, dwProcessCount: u32) -> u32;
+    }
+    let mut pids = [MaybeUninit::<u32>::uninit(); 16];
+    let count = unsafe { GetConsoleProcessList(pids[0].as_mut_ptr(), 16) };
+    count <= 1
+}
+#[cfg(not(windows))]
+fn is_gui_launch() -> bool { false }
 // ============================= main =========================================
 
 fn main() -> io::Result<()> {
@@ -690,13 +707,21 @@ fn main() -> io::Result<()> {
     println!("[proxy] Listening on {addr}\n");
 
     // Resolve browser launch: specific flag > -b auto-detect
-    let browser_req: Option<(BrowserKind, Option<String>)> = 
+    let browser_req: Option<(BrowserKind, Option<String>)> =
         args.chrome.clone().map(|p| (BrowserKind::Chrome, p.filter(|s| !s.is_empty())))
         .or_else(|| args.chromium.clone().map(|p| (BrowserKind::Chromium, p.filter(|s| !s.is_empty()))))
         .or_else(|| args.edge.clone().map(|p| (BrowserKind::Edge, p.filter(|s| !s.is_empty()))))
         .or_else(|| args.firefox.clone().map(|p| (BrowserKind::Firefox, p.filter(|s| !s.is_empty()))));
-    
-    if let Some((kind, explicit_path)) = browser_req {
+
+    let gui_launch = is_gui_launch();
+    if gui_launch {
+        // Double-clicked from Explorer: auto-launch browser with default URL
+        if let Some((kind, exe)) = auto_detect_browser() {
+            launch_browser(kind, &exe, &addr, "https://bgm.tv");
+        } else {
+            eprintln!("[browser] No supported browser found");
+        }
+    } else if let Some((kind, explicit_path)) = browser_req {
         let exe = explicit_path.or_else(|| find_browser(kind)).unwrap_or_else(|| {
             eprintln!("[browser] {} not found", kind.name());
             std::process::exit(1);

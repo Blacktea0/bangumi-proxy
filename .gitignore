@@ -5,3 +5,8 @@
 *.pdb
 *.obj
 *.o
+ca.pem
+ca-key.pem
+conan/
+.cargo/
+ca.cer
