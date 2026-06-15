@@ -45,9 +45,19 @@ refactor(ech): extract GREASE ECH into C helper for Windows compat
 
 ## Architecture
 
-- `src/main.rs` — HTTP proxy server with ECH (Encrypted Client Hello) support
-- `ech_helper.c` — C helper for GREASE ECH (works around openssl-sys 32-bit `SSL_CTX_set_options` on Windows)
-- `build.rs` — Compiles the C helper via the `cc` crate
+- `src/main.rs` — entry point, argument parsing, listener setup, browser launch
+- `src/cli.rs` — CLI flags and defaults
+- `src/proxy.rs` — HTTP/HTTPS proxy request handling and CONNECT tunneling
+- `src/backend.rs` — upstream connection selection
+- `src/browser.rs` — Chrome discovery and launch with proxy settings
+- `src/ca.rs` — local MITM CA loading and generation
+- `src/dns.rs` — DNS and DoH resolution
+- `src/ech.rs` — ECH (Encrypted Client Hello) state and TLS integration
+- `src/hosts.rs` — custom hosts file parsing
+- `src/targets.rs` — supported Bangumi target host rules
+- `ech_helper.c` — C helper for GREASE ECH; this works around
+  `openssl-sys` compatibility gaps on Windows
+- `build.rs` — detects OpenSSL ECH headers and compiles `ech_helper.c`
 
 ## CLI Usage
 
@@ -84,12 +94,18 @@ cargo run -- -b -p 9090 -u http://lain.bgm.tv --hosts ./hosts
 
 ## Development
 
-```bash
+```powershell
 # Build (requires OpenSSL 4.0 via scoop)
-set OPENSSL_DIR=%USERPROFILE%\scoop\apps\openssl\current
-set OPENSSL_LIB_DIR=%OPENSSL_DIR%\lib
-set OPENSSL_INCLUDE_DIR=%OPENSSL_DIR%\include
+$env:OPENSSL_DIR = "$env:USERPROFILE\scoop\apps\openssl\current"
+$env:OPENSSL_LIB_DIR = "$env:OPENSSL_DIR\lib"
+$env:OPENSSL_INCLUDE_DIR = "$env:OPENSSL_DIR\include"
 cargo build
+
+# Format
+cargo fmt
+
+# Check
+cargo check
 
 # Test
 curl -x http://127.0.0.1:8080 http://chii.in/

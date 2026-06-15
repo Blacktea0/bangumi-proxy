@@ -5,15 +5,19 @@ fn main() {
 
     if cfg!(target_os = "windows") {
         // Windows: check OPENSSL_DIR env first, fall back to scoop
-        let openssl_dir = std::env::var("OPENSSL_DIR").ok()
-            .unwrap_or_else(|| format!("{}\\scoop\\apps\\openssl\\current", std::env::var("USERPROFILE").unwrap_or_default()));
-        let include_dir = std::env::var("OPENSSL_INCLUDE_DIR").ok()
+        let openssl_dir = std::env::var("OPENSSL_DIR").ok().unwrap_or_else(|| {
+            format!(
+                "{}\\scoop\\apps\\openssl\\current",
+                std::env::var("USERPROFILE").unwrap_or_default()
+            )
+        });
+        let include_dir = std::env::var("OPENSSL_INCLUDE_DIR")
+            .ok()
             .unwrap_or_else(|| format!("{openssl_dir}\\include"));
-        let lib_dir = std::env::var("OPENSSL_LIB_DIR").ok()
-            .unwrap_or_else(|| format!("{openssl_dir}\\lib"));
 
         // Try to compile ECH helper
-        let ech_available = std::path::Path::new(&format!("{include_dir}\\openssl\\ech.h")).exists();
+        let ech_available =
+            std::path::Path::new(&format!("{include_dir}\\openssl\\ech.h")).exists();
 
         if ech_available {
             cc::Build::new()
@@ -35,14 +39,20 @@ fn main() {
     } else {
         // Linux/macOS: support OPENSSL_DIR for custom OpenSSL (e.g. /opt/openssl-4.0)
         let openssl_dir = std::env::var("OPENSSL_DIR").ok();
-        let openssl_include = std::env::var("OPENSSL_INCLUDE_DIR").ok()
+        let openssl_include = std::env::var("OPENSSL_INCLUDE_DIR")
+            .ok()
             .or_else(|| openssl_dir.as_ref().map(|d| format!("{d}/include")))
             .or_else(|| {
                 pkg_config::Config::new()
                     .atleast_version("3.0")
                     .probe("openssl")
                     .ok()
-                    .and_then(|lib| lib.include_paths.into_iter().next().map(|p| p.display().to_string()))
+                    .and_then(|lib| {
+                        lib.include_paths
+                            .into_iter()
+                            .next()
+                            .map(|p| p.display().to_string())
+                    })
             })
             .unwrap_or_else(|| "/usr/include".to_string());
 
@@ -61,7 +71,8 @@ fn main() {
         }
 
         // Try to compile ECH helper — check ech.h for ECH APIs
-        let ech_available = std::path::Path::new(&format!("{openssl_include}/openssl/ech.h")).exists();
+        let ech_available =
+            std::path::Path::new(&format!("{openssl_include}/openssl/ech.h")).exists();
 
         if ech_available {
             cc::Build::new()

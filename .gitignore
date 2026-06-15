@@ -1,7 +1,25 @@
-/target
+target/
+
+# Local editor and IDE state
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local Cargo overrides often contain machine-specific paths.
+.cargo/
+
+# Build artifacts
 *.exe
 *.dll
+*.dylib
+*.so
 *.lib
 *.pdb
 *.obj
 *.o
+
+# Local test/runtime files
+*.log
+my_hosts.txt
+hosts.local
