@@ -1,6 +1,6 @@
 [package]
 name = "bangumi-proxy"
-version = "0.3.0"
+version = "0.5.0"
 edition = "2021"
 
 [dependencies]
@@ -13,6 +13,7 @@ which = "7"
 rcgen = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2"
+base64 = "0.22"
 
 [build-dependencies]
 cc = "1"

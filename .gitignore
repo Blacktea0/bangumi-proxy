@@ -23,3 +23,8 @@ target/
 *.log
 my_hosts.txt
 hosts.local
+ca.pem
+ca-key.pem
+conan/
+.cargo/
+ca.cer

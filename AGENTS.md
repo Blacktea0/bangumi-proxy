@@ -65,12 +65,16 @@ refactor(ech): extract GREASE ECH into C helper for Windows compat
 bangumi-proxy [OPTIONS]
 
 Options:
-  -p, --port <PORT>      监听端口 [default: 8080]
-  -b, --browser          启动浏览器并自动配置代理
-  -u, --url <URL>        浏览器启动后打开的 URL [default: http://chii.in]
-      --chrome <CHROME>  Chrome 可执行文件路径（留空自动检测）
-      --dns <DNS>        DoH URL 或纯 DNS IP [default: https://doh.pub/dns-query]
-      --hosts <HOSTS>    自定义 hosts 文件路径（标准格式：IP domain）
+  -p, --port <PORT>        Listening port [default: 8080]
+  -b, --browser            Launch browser with auto-configured proxy (auto-detect priority: chrome > chromium > edge > firefox)
+  -u, --url <URL>          URL to open in browser [default: https://bgm.tv]
+      --chrome [PATH]      Use Chrome (optional custom path)
+      --chromium [PATH]    Use Chromium (optional custom path)
+      --edge [PATH]        Use Edge (optional custom path)
+      --firefox [PATH]     Use Firefox (optional custom path)
+      --dns <DNS>          DoH URL or plain DNS IP [default: https://doh.pub/dns-query]
+      --hosts <HOSTS>      Custom hosts file path (standard format: IP domain)
+      --trust-ca           Install CA certificate to system trust store (run on first use or when certificate expires)
 ```
 
 ### Examples
@@ -79,8 +83,17 @@ Options:
 # Default: proxy on :8080, no browser
 cargo run
 
-# Launch Chrome with proxy, open bgm.tv
-cargo run -- --browser --url http://bgm.tv
+# Auto-detect and launch browser with proxy
+cargo run -- -b --url https://bgm.tv
+
+# Use specific browser (auto-detect path)
+cargo run -- --chrome
+cargo run -- --edge --url https://bgm.tv
+cargo run -- --firefox
+
+# Use specific browser with custom path
+cargo run -- --chrome "C:/path/to/chrome.exe"
+cargo run -- --firefox "/usr/bin/firefox"
 
 # Custom port
 cargo run -- --port 9090
@@ -88,25 +101,50 @@ cargo run -- --port 9090
 # Use custom hosts file (CF IPs → ECH, others → direct)
 cargo run -- --hosts ./my_hosts.txt
 
+# Trust CA certificate (first-time setup, installs to OS trust store)
+cargo run -- --trust-ca
+
 # All options
-cargo run -- -b -p 9090 -u http://lain.bgm.tv --hosts ./hosts
-```
+cargo run -- -b -p 9090 -u https://lain.bgm.tv --hosts ./hosts
 
 ## Development
 
-```powershell
-# Build (requires OpenSSL 4.0 via scoop)
-$env:OPENSSL_DIR = "$env:USERPROFILE\scoop\apps\openssl\current"
-$env:OPENSSL_LIB_DIR = "$env:OPENSSL_DIR\lib"
-$env:OPENSSL_INCLUDE_DIR = "$env:OPENSSL_DIR\include"
+### Prerequisites
+
+- [Rust](https://rustup.rs/) (stable)
+- [Conan 2.x](https://conan.io/) (`pip install conan` or `pipx install conan`)
+- C compiler (MSVC on Windows, gcc/clang on Linux/macOS)
+
+### Build
+
+```bash
+# 1. Install OpenSSL 4.0 via Conan (first time only)
+conan profile detect --force
+# Linux/macOS:
+conan install conan --build=missing -s build_type=Release
+# Windows (needs static CRT to match Rust MSVC default):
+conan install conan --build=missing -s build_type=Release -s compiler.runtime=static
+
+# 2. Set OpenSSL environment variables
+# Linux/macOS:
+CONAN_PKG=$(find ~/.conan2/p -path "*/p/include/openssl/ech.h" 2>/dev/null | head -1 | sed 's|/include/openssl/ech.h||')
+export OPENSSL_DIR=$CONAN_PKG
+export OPENSSL_INCLUDE_DIR=$CONAN_PKG/include
+export OPENSSL_LIB_DIR=$CONAN_PKG/lib
+export OPENSSL_STATIC=1
+
+# Windows (PowerShell):
+$libFile = Get-ChildItem -Path "$env:USERPROFILE\.conan2\p" -Recurse -Filter "libssl.lib" -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match "\\p\\lib\\" } | Select-Object -First 1
+$CONAN_PKG = $libFile.Directory.Parent.FullName
+$env:OPENSSL_DIR = $CONAN_PKG
+$env:OPENSSL_INCLUDE_DIR = "$CONAN_PKG\include"
+$env:OPENSSL_LIB_DIR = $libFile.DirectoryName
+$env:OPENSSL_STATIC = "1"
+
+# 3. Build
 cargo build
+cargo build --release
 
-# Format
-cargo fmt
-
-# Check
-cargo check
-
-# Test
+# 4. Test
 curl -x http://127.0.0.1:8080 http://chii.in/
 ```

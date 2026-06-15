@@ -14,6 +14,8 @@ fn main() {
         let include_dir = std::env::var("OPENSSL_INCLUDE_DIR")
             .ok()
             .unwrap_or_else(|| format!("{openssl_dir}\\include"));
+        let _lib_dir = std::env::var("OPENSSL_LIB_DIR").ok()
+            .unwrap_or_else(|| format!("{openssl_dir}\\lib"));
 
         // Try to compile ECH helper
         let ech_available =
@@ -21,6 +23,7 @@ fn main() {
 
         if ech_available {
             cc::Build::new()
+                .static_crt(true)
                 .file("ech_helper.c")
                 .include(&include_dir)
                 .compile("ech_helper");
