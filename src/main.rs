@@ -439,8 +439,7 @@ fn find_chrome() -> Option<String> {
         .map(|p| p.display().to_string())
 }
 fn launch_browser(chrome: &str, proxy: &str, url: &str) {
-    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-    let p = format!("{}/bangumi-proxy-{ts}", std::env::temp_dir().display());
+    let p = format!("{}/bangumi-proxy", std::env::temp_dir().display());
     println!("[browser] {chrome} proxy=http://{proxy} url={url}");
     println!("[browser] profile={p}\n");
     let _ = std::process::Command::new(chrome).args([format!("--proxy-server=http://{proxy}"), "--remote-debugging-port=9222".into(), "--no-first-run".into(), "--no-default-browser-check".into(), format!("--user-data-dir={p}"), "--ignore-certificate-errors".into(), url.into()]).spawn();
