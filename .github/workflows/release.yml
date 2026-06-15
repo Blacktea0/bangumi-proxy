@@ -17,23 +17,26 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - uses: actions/cache@v4
         with:
-          path: ~/.conan2
-          key: conan-openssl-4.0.1-linux-musl-v2
-      - run: pip install conan
-      - name: Install OpenSSL 4.0 via Conan (musl)
+          path: /tmp/openssl-musl
+          key: openssl-4.0.1-musl-v1
+      - name: Build OpenSSL 4.0 for musl
         run: |
-          conan profile detect --force
-          mkdir -p conan
-          printf '[requires]\nopenssl/4.0.1\n[generators]\nPkgConfigDeps\nVirtualBuildEnv\nVirtualRunEnv\n' > conan/conanfile.txt
-          CC=musl-gcc conan install conan --build=missing -s build_type=Release -s arch=x86_64
+          if [ -f /tmp/openssl-musl/include/openssl/ech.h ]; then
+            echo "Using cached OpenSSL musl build"
+            exit 0
+          fi
+          curl -sSL https://github.com/openssl/openssl/releases/download/openssl-4.0.1/openssl-4.0.1.tar.gz | tar xz
+          cd openssl-4.0.1
+          CC=musl-gcc ./Configure linux-x86_64 --prefix=/tmp/openssl-musl \
+            no-shared no-async no-ui-console \
+            -DOPENSSL_NO_ASYNC
+          make -j$(nproc)
+          make install_sw
       - name: Build (musl static)
         run: |
-          CONAN_PKG=$(find ~/.conan2/p -path "*/p/include/openssl/ech.h" 2>/dev/null | head -1 | sed 's|/include/openssl/ech.h||')
-          echo "CONAN_PKG=$CONAN_PKG"
-          export OPENSSL_DIR=$CONAN_PKG
-          export OPENSSL_INCLUDE_DIR=$CONAN_PKG/include
-          LIB_DIR=$(ls -d $CONAN_PKG/lib* 2>/dev/null | head -1)
-          export OPENSSL_LIB_DIR=${LIB_DIR:-$CONAN_PKG/lib}
+          export OPENSSL_DIR=/tmp/openssl-musl
+          export OPENSSL_INCLUDE_DIR=/tmp/openssl-musl/include
+          export OPENSSL_LIB_DIR=/tmp/openssl-musl/lib64
           export OPENSSL_STATIC=1
           export CC_x86_64_unknown_linux_musl=musl-gcc
           export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
@@ -58,7 +61,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.conan2
-          key: conan-openssl-4.0.1-macos-x86_64-v2
+          key: conan-openssl-4.0.1-macos-x86_64-v3
       - run: pipx install conan
       - name: Install OpenSSL 4.0 via Conan
         run: |
@@ -75,8 +78,8 @@ jobs:
           LIB_DIR=$(ls -d $CONAN_PKG/lib* 2>/dev/null | head -1)
           export OPENSSL_LIB_DIR=${LIB_DIR:-$CONAN_PKG/lib}
           export OPENSSL_STATIC=1
-          export CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER="clang -arch x86_64"
-          export CC_x86_64_apple_darwin="clang -arch x86_64"
+          export CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER=clang
+          export CARGO_ENCODED_RUSTFLAGS="-Clink-arg=-arch\x1f-Clink-arg=x86_64"
           cargo build --release --target x86_64-apple-darwin
       - name: Package
         run: |
