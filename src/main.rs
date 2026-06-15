@@ -50,7 +50,14 @@ struct Args {
     #[arg(short, long, default_value_t = 8080)] port: u16,
     #[arg(short, long)] browser: bool,
     #[arg(short, long, default_value = "http://chii.in")] url: String,
-    #[arg(long)] chrome: Option<String>,
+    /// 使用 Chrome（可选指定路径）
+    #[arg(long, num_args = 0..=1, default_missing_value = "")] chrome: Option<Option<String>>,
+    /// 使用 Chromium（可选指定路径）
+    #[arg(long, num_args = 0..=1, default_missing_value = "")] chromium: Option<Option<String>>,
+    /// 使用 Edge（可选指定路径）
+    #[arg(long, num_args = 0..=1, default_missing_value = "")] edge: Option<Option<String>>,
+    /// 使用 Firefox（可选指定路径）
+    #[arg(long, num_args = 0..=1, default_missing_value = "")] firefox: Option<Option<String>>,
     /// DoH URL or plain DNS IP
     #[arg(long, default_value = "https://doh.pub/dns-query")] dns: String,
     /// 自定义 hosts 文件路径（标准格式：IP domain）
@@ -417,35 +424,114 @@ fn handle_client(mut client: TcpStream, cache: Arc<EchCache>, ca: Arc<MitmCa>) {
 }
 
 // ============================= Browser ======================================
+#[derive(Clone, Copy, Debug)]
+enum BrowserKind { Chrome, Chromium, Edge, Firefox }
+impl BrowserKind {
+    fn name(self) -> &'static str { match self { Self::Chrome => "chrome", Self::Chromium => "chromium", Self::Edge => "edge", Self::Firefox => "firefox" } }
+    fn is_chromium(self) -> bool { matches!(self, Self::Chrome | Self::Chromium | Self::Edge) }
+}
 
-fn find_chrome() -> Option<String> {
+fn find_browser(kind: BrowserKind) -> Option<String> {
     #[cfg(target_os = "windows")]
     {
-        for c in &["C:/Program Files/Google/Chrome/Application/chrome.exe", "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe", "C:/Program Files/Microsoft/Edge/Application/msedge.exe"] {
-            if std::path::Path::new(c).exists() { return Some(c.to_string()); }
-        }
+        let candidates: &[&str] = match kind {
+            BrowserKind::Chrome => &["C:/Program Files/Google/Chrome/Application/chrome.exe", "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe"],
+            BrowserKind::Chromium => &["C:/Program Files/Chromium/Application/chrome.exe", "C:/Program Files (x86)/Chromium/Application/chrome.exe"],
+            BrowserKind::Edge => &["C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe", "C:/Program Files/Microsoft/Edge/Application/msedge.exe"],
+            BrowserKind::Firefox => &["C:/Program Files/Mozilla Firefox/firefox.exe", "C:/Program Files (x86)/Mozilla Firefox/firefox.exe"],
+        };
+        for c in candidates { if std::path::Path::new(c).exists() { return Some(c.to_string()); } }
     }
     #[cfg(target_os = "linux")]
     {
-        for c in &["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable", "/snap/bin/chromium"] {
-            if std::path::Path::new(c).exists() { return Some(c.to_string()); }
-        }
+        let candidates: &[&str] = match kind {
+            BrowserKind::Chrome => &["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"],
+            BrowserKind::Chromium => &["/usr/bin/chromium", "/usr/bin/chromium-browser", "/snap/bin/chromium"],
+            BrowserKind::Edge => &["/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable"],
+            BrowserKind::Firefox => &["/usr/bin/firefox", "/usr/bin/firefox-esr"],
+        };
+        for c in candidates { if std::path::Path::new(c).exists() { return Some(c.to_string()); } }
     }
-    which::which("google-chrome").ok()
-        .or_else(|| which::which("chromium").ok())
-        .or_else(|| which::which("chromium-browser").ok())
-        .or_else(|| which::which("microsoft-edge").ok())
-        .or_else(|| which::which("msedge").ok())
-        .map(|p| p.display().to_string())
-}
-fn launch_browser(chrome: &str, proxy: &str, url: &str) {
-    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-    let p = format!("{}/bangumi-proxy-{ts}", std::env::temp_dir().display());
-    println!("[browser] {chrome} proxy=http://{proxy} url={url}");
-    println!("[browser] profile={p}\n");
-    let _ = std::process::Command::new(chrome).args([format!("--proxy-server=http://{proxy}"), "--remote-debugging-port=9222".into(), "--no-first-run".into(), "--no-default-browser-check".into(), format!("--user-data-dir={p}"), "--ignore-certificate-errors".into(), url.into()]).spawn();
+    #[cfg(target_os = "macos")]
+    {
+        let candidates: &[&str] = match kind {
+            BrowserKind::Chrome => &["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"],
+            BrowserKind::Chromium => &["/Applications/Chromium.app/Contents/MacOS/Chromium"],
+            BrowserKind::Edge => &["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"],
+            BrowserKind::Firefox => &["/Applications/Firefox.app/Contents/MacOS/firefox"],
+        };
+        for c in candidates { if std::path::Path::new(c).exists() { return Some(c.to_string()); } }
+    }
+    let names: &[&str] = match kind {
+        BrowserKind::Chrome => &["google-chrome", "chrome"],
+        BrowserKind::Chromium => &["chromium", "chromium-browser"],
+        BrowserKind::Edge => &["microsoft-edge", "msedge"],
+        BrowserKind::Firefox => &["firefox", "firefox-esr"],
+    };
+    for n in names { if let Some(p) = which::which(n).ok() { return Some(p.display().to_string()); } }
+    None
 }
 
+/// Auto-detect browser with priority: chrome > chromium > edge > firefox
+fn auto_detect_browser() -> Option<(BrowserKind, String)> {
+    for kind in [BrowserKind::Chrome, BrowserKind::Chromium, BrowserKind::Edge, BrowserKind::Firefox] {
+        if let Some(path) = find_browser(kind) { return Some((kind, path)); }
+    }
+    None
+}
+
+fn launch_browser(kind: BrowserKind, exe: &str, proxy: &str, url: &str) {
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let profile = std::env::temp_dir().join(format!("bangumi-proxy-{ts}"));
+    let profile_s = profile.display().to_string();
+    println!("[browser] {} proxy=http://{proxy} url={url}", kind.name());
+    println!("[browser] exe={exe}");
+    println!("[browser] profile={profile_s}\n");
+    if kind.is_chromium() {
+        match std::process::Command::new(exe).args([
+            format!("--proxy-server=http://{proxy}"),
+            "--remote-debugging-port=9222".into(),
+            "--no-first-run".into(),
+            "--no-default-browser-check".into(),
+            format!("--user-data-dir={profile_s}"),
+            "--ignore-certificate-errors".into(),
+            url.into(),
+        ]).spawn() {
+            Ok(_) => {}
+            Err(e) => eprintln!("[browser] failed to launch {}: {e}", kind.name()),
+        }
+    } else {
+        // Firefox: create profile with proxy prefs
+        // prefs.js is the primary config file Firefox reads on startup
+        let _ = std::fs::create_dir_all(&profile);
+        let _ = std::fs::write(profile.join("prefs.js"), format!(
+            "user_pref(\"network.proxy.type\", 1);\n\
+             user_pref(\"network.proxy.http\", \"127.0.0.1\");\n\
+             user_pref(\"network.proxy.http_port\", {port});\n\
+             user_pref(\"network.proxy.ssl\", \"127.0.0.1\");\n\
+             user_pref(\"network.proxy.ssl_port\", {port});\n\
+             user_pref(\"network.proxy.no_proxies_on\", \"\");\n\
+             user_pref(\"security.enterprise_roots.enabled\", true);\n\
+             user_pref(\"security.OCSP.enabled\", 0);\n\
+             user_pref(\"security.cert_pinning.enforcement_level\", 0);\n",
+            port = proxy.split(':').nth(1).unwrap_or("8080")
+        ));
+        // Firefox: --no-remote avoids existing instances, CREATE_NEW_CONSOLE for Windows
+        let mut cmd = std::process::Command::new(exe);
+        cmd.args([
+            "--no-remote",
+            "--profile",
+            profile_s.as_str(),
+            url,
+        ]);
+        #[cfg(target_os = "windows")]
+        { use std::os::windows::process::CommandExt; cmd.creation_flags(0x00000010); } // CREATE_NEW_CONSOLE
+        match cmd.spawn() {
+            Ok(_) => {}
+            Err(e) => eprintln!("[browser] failed to launch firefox: {e}"),
+        }
+    }
+}
 // ============================= main =========================================
 
 fn main() -> io::Result<()> {
@@ -468,10 +554,29 @@ fn main() -> io::Result<()> {
     let listener = TcpListener::bind(&addr)?;
     println!("[proxy] Listening on {addr}\n");
 
-    if args.browser {
-        let chrome = args.chrome.clone().or_else(find_chrome).unwrap_or_else(|| { eprintln!("[browser] Chrome not found"); std::process::exit(1); });
-        launch_browser(&chrome, &addr, &args.url);
-    } else { println!("Tip: use -b to auto-launch Chrome\n"); }
+    // Resolve browser launch: specific flag > -b auto-detect
+    let browser_req: Option<(BrowserKind, Option<String>)> = 
+        args.chrome.clone().map(|p| (BrowserKind::Chrome, p.filter(|s| !s.is_empty())))
+        .or_else(|| args.chromium.clone().map(|p| (BrowserKind::Chromium, p.filter(|s| !s.is_empty()))))
+        .or_else(|| args.edge.clone().map(|p| (BrowserKind::Edge, p.filter(|s| !s.is_empty()))))
+        .or_else(|| args.firefox.clone().map(|p| (BrowserKind::Firefox, p.filter(|s| !s.is_empty()))));
+    
+    if let Some((kind, explicit_path)) = browser_req {
+        let exe = explicit_path.or_else(|| find_browser(kind)).unwrap_or_else(|| {
+            eprintln!("[browser] {} not found", kind.name());
+            std::process::exit(1);
+        });
+        launch_browser(kind, &exe, &addr, &args.url);
+    } else if args.browser {
+        if let Some((kind, exe)) = auto_detect_browser() {
+            launch_browser(kind, &exe, &addr, &args.url);
+        } else {
+            eprintln!("[browser] No supported browser found");
+            std::process::exit(1);
+        }
+    } else {
+        println!("Tip: use -b to auto-launch browser, or --chrome/--edge/--firefox\n");
+    }
 
     for stream in listener.incoming() {
         if let Ok(client) = stream {

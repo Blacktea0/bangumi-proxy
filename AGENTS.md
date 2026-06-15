@@ -55,12 +55,15 @@ refactor(ech): extract GREASE ECH into C helper for Windows compat
 bangumi-proxy [OPTIONS]
 
 Options:
-  -p, --port <PORT>      监听端口 [default: 8080]
-  -b, --browser          启动浏览器并自动配置代理
-  -u, --url <URL>        浏览器启动后打开的 URL [default: http://chii.in]
-      --chrome <CHROME>  Chrome 可执行文件路径（留空自动检测）
-      --dns <DNS>        DoH URL 或纯 DNS IP [default: https://doh.pub/dns-query]
-      --hosts <HOSTS>    自定义 hosts 文件路径（标准格式：IP domain）
+  -p, --port <PORT>        监听端口 [default: 8080]
+  -b, --browser            启动浏览器并自动配置代理（自动检测，优先级：chrome > chromium > edge > firefox）
+  -u, --url <URL>          浏览器启动后打开的 URL [default: http://chii.in]
+      --chrome [PATH]      使用 Chrome（可选指定路径）
+      --chromium [PATH]    使用 Chromium（可选指定路径）
+      --edge [PATH]        使用 Edge（可选指定路径）
+      --firefox [PATH]     使用 Firefox（可选指定路径）
+      --dns <DNS>          DoH URL 或纯 DNS IP [default: https://doh.pub/dns-query]
+      --hosts <HOSTS>      自定义 hosts 文件路径（标准格式：IP domain）
 ```
 
 ### Examples
@@ -69,8 +72,17 @@ Options:
 # Default: proxy on :8080, no browser
 cargo run
 
-# Launch Chrome with proxy, open bgm.tv
-cargo run -- --browser --url http://bgm.tv
+# Auto-detect and launch browser with proxy
+cargo run -- -b --url http://bgm.tv
+
+# Use specific browser (auto-detect path)
+cargo run -- --chrome
+cargo run -- --edge --url http://bgm.tv
+cargo run -- --firefox
+
+# Use specific browser with custom path
+cargo run -- --chrome "C:/path/to/chrome.exe"
+cargo run -- --firefox "/usr/bin/firefox"
 
 # Custom port
 cargo run -- --port 9090
@@ -80,7 +92,6 @@ cargo run -- --hosts ./my_hosts.txt
 
 # All options
 cargo run -- -b -p 9090 -u http://lain.bgm.tv --hosts ./hosts
-```
 
 ## Development
 
