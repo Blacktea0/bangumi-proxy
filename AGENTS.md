@@ -55,16 +55,16 @@ refactor(ech): extract GREASE ECH into C helper for Windows compat
 bangumi-proxy [OPTIONS]
 
 Options:
-  -p, --port <PORT>        监听端口 [default: 8080]
-  -b, --browser            启动浏览器并自动配置代理（自动检测，优先级：chrome > chromium > edge > firefox）
-  -u, --url <URL>          浏览器启动后打开的 URL [default: https://bgm.tv]
-      --chrome [PATH]      使用 Chrome（可选指定路径）
-      --chromium [PATH]    使用 Chromium（可选指定路径）
-      --edge [PATH]        使用 Edge（可选指定路径）
-      --firefox [PATH]     使用 Firefox（可选指定路径）
-      --dns <DNS>          DoH URL 或纯 DNS IP [default: https://doh.pub/dns-query]
-      --hosts <HOSTS>      自定义 hosts 文件路径（标准格式：IP domain）
-      --trust-ca           安装 CA 证书到系统信任根证书（首次使用或证书过期时运行）
+  -p, --port <PORT>        Listening port [default: 8080]
+  -b, --browser            Launch browser with auto-configured proxy (auto-detect priority: chrome > chromium > edge > firefox)
+  -u, --url <URL>          URL to open in browser [default: https://bgm.tv]
+      --chrome [PATH]      Use Chrome (optional custom path)
+      --chromium [PATH]    Use Chromium (optional custom path)
+      --edge [PATH]        Use Edge (optional custom path)
+      --firefox [PATH]     Use Firefox (optional custom path)
+      --dns <DNS>          DoH URL or plain DNS IP [default: https://doh.pub/dns-query]
+      --hosts <HOSTS>      Custom hosts file path (standard format: IP domain)
+      --trust-ca           Install CA certificate to system trust store (run on first use or when certificate expires)
 ```
 
 ### Examples
