@@ -1,0 +1,20 @@
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[command(name = "bangumi-proxy", version, about = "HTTP/HTTPS proxy + ECH")]
+pub struct Args {
+    #[arg(short, long, default_value_t = 8080)]
+    pub port: u16,
+    #[arg(short, long)]
+    pub browser: bool,
+    #[arg(short, long, default_value = "http://chii.in")]
+    pub url: String,
+    #[arg(long)]
+    pub chrome: Option<String>,
+    /// DoH URL or plain DNS IP
+    #[arg(long, default_value = "https://doh.pub/dns-query")]
+    pub dns: String,
+    /// 自定义 hosts 文件路径（标准格式：IP domain）
+    #[arg(long)]
+    pub hosts: Option<String>,
+}
