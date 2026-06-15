@@ -9,13 +9,13 @@ jobs:
   build-linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
       - name: Install musl-tools
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: /tmp/openssl-musl
           key: openssl-4.0.1-musl-v2
@@ -46,7 +46,7 @@ jobs:
           mkdir -p dist
           cp target/x86_64-unknown-linux-musl/release/bangumi-proxy dist/
           tar czf "bangumi-proxy-${GITHUB_REF_NAME}-linux-x86_64.tar.gz" -C dist .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: linux-x86_64
           path: bangumi-proxy-*-linux-x86_64.tar.gz
@@ -54,11 +54,11 @@ jobs:
   build-macos-x86_64:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-apple-darwin
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: ~/.conan2
           key: conan-openssl-4.0.1-macos-x86_64-v3
@@ -86,7 +86,7 @@ jobs:
           mkdir -p dist
           cp target/x86_64-apple-darwin/release/bangumi-proxy dist/
           tar czf "bangumi-proxy-${GITHUB_REF_NAME}-macos-x86_64.tar.gz" -C dist .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: macos-x86_64
           path: bangumi-proxy-*-macos-x86_64.tar.gz
@@ -94,9 +94,9 @@ jobs:
   build-macos-aarch64:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: ~/.conan2
           key: conan-openssl-4.0.1-macos-aarch64-v1
@@ -122,7 +122,7 @@ jobs:
           mkdir -p dist
           cp target/release/bangumi-proxy dist/
           tar czf "bangumi-proxy-${GITHUB_REF_NAME}-macos-aarch64.tar.gz" -C dist .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: macos-aarch64
           path: bangumi-proxy-*-macos-aarch64.tar.gz
@@ -130,9 +130,9 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: ~/.conan2
           key: conan-openssl-4.0.1-windows-v1
@@ -162,7 +162,7 @@ jobs:
           mkdir dist -Force
           Copy-Item target\release\bangumi-proxy.exe dist\
           Compress-Archive -Path dist\* -DestinationPath "bangumi-proxy-${env:GITHUB_REF_NAME}-windows-x86_64.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: windows-x86_64
           path: bangumi-proxy-*-windows-x86_64.zip
@@ -174,7 +174,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: artifacts
       - uses: softprops/action-gh-release@v2
