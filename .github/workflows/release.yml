@@ -155,6 +155,7 @@ jobs:
           $env:OPENSSL_INCLUDE_DIR = "$CONAN_PKG\include"
           $env:OPENSSL_LIB_DIR = $libFile.DirectoryName
           $env:OPENSSL_STATIC = "1"
+          $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = "-C target-feature=+crt-static"
           cargo build --release
       - name: Package
         shell: pwsh
