@@ -64,6 +64,7 @@ Options:
       --firefox [PATH]     使用 Firefox（可选指定路径）
       --dns <DNS>          DoH URL 或纯 DNS IP [default: https://doh.pub/dns-query]
       --hosts <HOSTS>      自定义 hosts 文件路径（标准格式：IP domain）
+      --trust-ca           安装 CA 证书到系统信任根证书（首次使用或证书过期时运行）
 ```
 
 ### Examples
@@ -89,6 +90,9 @@ cargo run -- --port 9090
 
 # Use custom hosts file (CF IPs → ECH, others → direct)
 cargo run -- --hosts ./my_hosts.txt
+
+# Trust CA certificate (first-time setup, installs to OS trust store)
+cargo run -- --trust-ca
 
 # All options
 cargo run -- -b -p 9090 -u http://lain.bgm.tv --hosts ./hosts

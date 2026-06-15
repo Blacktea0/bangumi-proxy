@@ -54,8 +54,9 @@ dependencies = [
 
 [[package]]
 name = "bangumi-proxy"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
+ "base64",
  "cc",
  "clap",
  "foreign-types-shared",

@@ -62,6 +62,8 @@ struct Args {
     #[arg(long, default_value = "https://doh.pub/dns-query")] dns: String,
     /// 自定义 hosts 文件路径（标准格式：IP domain）
     #[arg(long)] hosts: Option<String>,
+    /// 安装 CA 证书到系统信任根证书（首次使用或证书过期时运行）
+    #[arg(long)] trust_ca: bool,
 }
 
 fn is_target(host: &str) -> bool { TARGETS.iter().any(|&t| host == t || host.ends_with(&format!(".{t}"))) }
@@ -99,6 +101,132 @@ impl MitmCa {
         let key = rustls::pki_types::PrivatePkcs8KeyDer::from(hk.serialize_der());
         rustls::ServerConfig::builder().with_no_client_auth()
             .with_single_cert(certs, rustls::pki_types::PrivateKeyDer::from(key)).unwrap()
+    }
+}
+
+/// 信任 CA 证书，返回 true 表示已信任（无需操作）。
+/// prompt=true: 交互模式 (--trust-ca)，未信任时提示安装；prompt=false: 静默检查，未信任只打印警告。
+fn trust_ca(prompt: bool) -> bool {
+    let dir = std::env::current_dir().unwrap_or_default();
+    let ca_pem = dir.join("ca.pem");
+    if !ca_pem.exists() {
+        eprintln!("[trust] ca.pem not found — run bangumi-proxy first to generate CA");
+        return false;
+    }
+    let ca_der = dir.join("ca.cer");
+
+    // ---- Windows: certutil → Trusted Root Certification Authorities ----
+    #[cfg(windows)]
+    {
+        let pem = std::fs::read_to_string(&ca_pem).unwrap();
+        let b64: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
+        use base64::Engine;
+        std::fs::write(&ca_der, base64::engine::general_purpose::STANDARD.decode(&b64).unwrap()).unwrap();
+        println!("[trust] DER: {}", ca_der.display());
+        let check = std::process::Command::new("certutil")
+            .args(["-store", "Root", "bangumi-proxy CA"]).output();
+        let trusted = check.map(|o| String::from_utf8_lossy(&o.stdout).contains("bangumi-proxy CA")).unwrap_or(false);
+        if trusted {
+            println!("[trust] ✓ Already trusted (Windows Root store)");
+            return true;
+        }
+        if !prompt {
+            println!("[trust] Not yet trusted. Run: bangumi-proxy --trust-ca");
+            return false;
+        }
+        println!("[trust] Not yet trusted. Install to Windows Root store:");
+        println!("  certutil -addstore Root \"{}\"", ca_der.display());
+        print!("  Run automatically now? [Y/n] ");
+        let _ = std::io::stdout().flush();
+        let mut buf = String::new();
+        let _ = std::io::stdin().read_line(&mut buf);
+        if !buf.trim().eq_ignore_ascii_case("n") {
+            match std::process::Command::new("certutil")
+                .args(["-addstore", "Root", ca_der.to_str().unwrap()]).status()
+            {
+                Ok(s) if s.success() => { println!("[trust] ✓ Installed"); return true; }
+                _ => println!("[trust] Failed — run the command above as Administrator"),
+            }
+        }
+        return false;
+    }
+
+    // ---- Linux: /usr/local/share/ca-certificates/ + update-ca-certificates ----
+    #[cfg(target_os = "linux")]
+    {
+        let target_dir = if std::path::Path::new("/etc/pki/ca-trust/source/anchors").exists() {
+            std::path::PathBuf::from("/etc/pki/ca-trust/source/anchors")
+        } else if std::path::Path::new("/usr/local/share/ca-certificates").exists() {
+            std::path::PathBuf::from("/usr/local/share/ca-certificates")
+        } else {
+            std::path::PathBuf::from("/usr/local/share/ca-certificates")
+        };
+        let target = target_dir.join("bangumi-proxy-ca.crt");
+        if target.exists() {
+            println!("[trust] ✓ Already installed: {}", target.display());
+            return true;
+        }
+        if !prompt {
+            println!("[trust] Not yet trusted. Run: bangumi-proxy --trust-ca");
+            return false;
+        }
+        println!("[trust] Copy ca.pem to system trust store:");
+        println!("  sudo cp \"{}\" \"{}\"", ca_pem.display(), target.display());
+        if target_dir.ends_with("anchors") {
+            println!("  sudo update-ca-trust");
+        } else {
+            println!("  sudo update-ca-certificates");
+        }
+        print!("  Run automatically now? [Y/n] ");
+        let _ = std::io::stdout().flush();
+        let mut buf = String::new();
+        let _ = std::io::stdin().read_line(&mut buf);
+        if !buf.trim().eq_ignore_ascii_case("n") {
+            if let Ok(s) = std::process::Command::new("sudo")
+                .args(["cp", ca_pem.to_str().unwrap(), target.to_str().unwrap()]).status()
+            {
+                if s.success() {
+                    let update = if target_dir.ends_with("anchors") { "update-ca-trust" } else { "update-ca-certificates" };
+                    let _ = std::process::Command::new("sudo").arg(update).status();
+                    println!("[trust] ✓ Installed");
+                    return true;
+                }
+            }
+            println!("[trust] Failed — run the commands above manually");
+        }
+        return false;
+    }
+
+    // ---- macOS: security add-trusted-cert ----
+    #[cfg(target_os = "macos")]
+    {
+        let check = std::process::Command::new("security")
+            .args(["find-certificate", "-c", "bangumi-proxy CA", "/Library/Keychains/System.keychain"]).output();
+        let trusted = check.map(|o| String::from_utf8_lossy(&o.stdout).contains("bangumi-proxy CA")).unwrap_or(false);
+        if trusted {
+            println!("[trust] ✓ Already trusted (macOS System keychain)");
+            return true;
+        }
+        if !prompt {
+            println!("[trust] Not yet trusted. Run: bangumi-proxy --trust-ca");
+            return false;
+        }
+        println!("[trust] Add to macOS System keychain:");
+        println!("  sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain \"{}\"", ca_pem.display());
+        print!("  Run automatically now? [Y/n] ");
+        let _ = std::io::stdout().flush();
+        let mut buf = String::new();
+        let _ = std::io::stdin().read_line(&mut buf);
+        if !buf.trim().eq_ignore_ascii_case("n") {
+            match std::process::Command::new("sudo")
+                .args(["security", "add-trusted-cert", "-d", "-r", "trustRoot", "-k",
+                       "/Library/Keychains/System.keychain", ca_pem.to_str().unwrap()]).status()
+            {
+                Ok(s) if s.success() => { println!("[trust] ✓ Installed"); return true; }
+                _ => println!("[trust] Failed — run the command above manually"),
+            }
+        }
+        return false;
     }
 }
 
@@ -538,6 +666,13 @@ fn main() -> io::Result<()> {
     let args = Args::parse();
     let addr = format!("127.0.0.1:{}", args.port);
     let ca = Arc::new(MitmCa::load_or_generate());
+    let already_trusted = trust_ca(args.trust_ca);
+    if args.trust_ca {
+        if already_trusted {
+            println!("[trust] Nothing to do — CA already trusted.");
+        }
+        return Ok(());
+    }
     let hosts = match &args.hosts { Some(path) => parse_hosts(path), None => std::collections::HashMap::new() };
 
     println!("╔══════════════════════════════════════════════════════════════╗");

@@ -96,9 +96,51 @@ jobs:
         with:
           name: windows-x86_64
           path: bangumi-proxy-*-windows-x86_64.zip
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: ~/.conan2
+          key: conan-openssl-4.0.1-macos-arm64-v1
+      - run: pip3 install conan
+      - name: Install OpenSSL 4.0 via Conan
+        run: |
+          conan profile detect --force
+          mkdir -p conan
+          cat > conan/conanfile.txt << 'EOF'
+          [requires]
+          openssl/4.0.1
+          [generators]
+          PkgConfigDeps
+          VirtualBuildEnv
+          VirtualRunEnv
+          EOF
+          cd conan && conan install . --build=missing -s build_type=Release
+      - name: Build
+        run: |
+          CONAN_PKG=$(find ~/.conan2/p -path "*/p/include/openssl/ech.h" 2>/dev/null | head -1 | sed 's|/include/openssl/ech.h||')
+          echo "CONAN_PKG=$CONAN_PKG"
+          export OPENSSL_DIR=$CONAN_PKG
+          export OPENSSL_INCLUDE_DIR=$CONAN_PKG/include
+          export OPENSSL_LIB_DIR=$CONAN_PKG/lib
+          export OPENSSL_STATIC=1
+          cargo build --release
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/bangumi-proxy dist/
+          cp ca.pem ca-key.pem dist/
+          tar czf "bangumi-proxy-${GITHUB_REF_NAME}-macos-arm64.tar.gz" -C dist .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: bangumi-proxy-*-macos-arm64.tar.gz
 
   release:
-    needs: [build-linux, build-windows]
+    needs: [build-linux, build-windows, build-macos]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
