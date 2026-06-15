@@ -18,7 +18,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: /tmp/openssl-musl
-          key: openssl-4.0.1-musl-v1
+          key: openssl-4.0.1-musl-v2
       - name: Build OpenSSL 4.0 for musl
         run: |
           if [ -f /tmp/openssl-musl/include/openssl/ech.h ]; then
@@ -27,7 +27,7 @@ jobs:
           fi
           curl -sSL https://github.com/openssl/openssl/releases/download/openssl-4.0.1/openssl-4.0.1.tar.gz | tar xz
           cd openssl-4.0.1
-          CC=musl-gcc ./Configure linux-x86_64 --prefix=/tmp/openssl-musl \
+          CFLAGS="-I/usr/include/x86_64-linux-gnu/musl" CC=musl-gcc ./Configure linux-x86_64 --prefix=/tmp/openssl-musl \
             no-shared no-async no-ui-console \
             -DOPENSSL_NO_ASYNC
           make -j$(nproc)
@@ -79,7 +79,7 @@ jobs:
           export OPENSSL_LIB_DIR=${LIB_DIR:-$CONAN_PKG/lib}
           export OPENSSL_STATIC=1
           export CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER=clang
-          export CARGO_ENCODED_RUSTFLAGS="-Clink-arg=-arch\x1f-Clink-arg=x86_64"
+          export CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS="-C link-arg=-arch -C link-arg=x86_64"
           cargo build --release --target x86_64-apple-darwin
       - name: Package
         run: |
