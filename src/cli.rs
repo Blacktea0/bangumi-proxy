@@ -11,9 +11,9 @@ pub struct Args {
     pub url: String,
     #[arg(long)]
     pub chrome: Option<String>,
-    /// DoH URL or plain DNS IP
-    #[arg(long, default_value = "https://doh.pub/dns-query")]
-    pub dns: String,
+    /// DoH URL or plain DNS IP，逗号分隔多个
+    #[arg(long, default_value = "https://doh.pub/dns-query", value_delimiter = ',')]
+    pub dns: Vec<String>,
     /// 自定义 hosts 文件路径（标准格式：IP domain）
     #[arg(long)]
     pub hosts: Option<String>,

@@ -1,18 +1,24 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, TcpStream, ToSocketAddrs};
+use std::net::{Ipv4Addr, TcpStream};
 
 use foreign_types_shared::ForeignType;
 #[cfg(has_ech)]
 use foreign_types_shared::ForeignTypeRef;
 use parking_lot::Mutex;
 
-use crate::dns::{doh_json, parse_a, resolve_plain_dns, system_dns};
+use crate::dns::{parse_a, resolve_multi, system_dns};
 use crate::targets::{is_cloudflare_ip, is_target};
 
 #[cfg(has_ech)]
 const OUTER_SNI: &str = "cloudflare-ech.com";
-pub const CF_DOH_IP: Ipv4Addr = Ipv4Addr::new(104, 16, 248, 249);
+
+pub const CF_DOH_IPS: &[Ipv4Addr] = &[
+    Ipv4Addr::new(104, 16, 248, 249),
+    Ipv4Addr::new(104, 16, 249, 249),
+    Ipv4Addr::new(1, 1, 1, 1),
+    Ipv4Addr::new(1, 0, 0, 1),
+];
 pub const CF_DOH_HOST: &str = "cloudflare-dns.com";
 
 static INIT: std::sync::Once = std::sync::Once::new();
@@ -56,16 +62,18 @@ mod ffi {
 pub struct EchCache {
     config: Mutex<Option<Vec<u8>>>,
     ips: Mutex<HashMap<String, Ipv4Addr>>,
-    dns: String,
+    dns_servers: Vec<String>,
+    cf_ips: Vec<Ipv4Addr>,
     pub hosts: HashMap<String, Ipv4Addr>,
 }
 
 impl EchCache {
-    pub fn new(dns: String, hosts: HashMap<String, Ipv4Addr>) -> Self {
+    pub fn new(dns_servers: Vec<String>, hosts: HashMap<String, Ipv4Addr>) -> Self {
         Self {
             config: Mutex::new(None),
             ips: Mutex::new(HashMap::new()),
-            dns,
+            dns_servers,
+            cf_ips: CF_DOH_IPS.to_vec(),
             hosts,
         }
     }
@@ -75,12 +83,20 @@ impl EchCache {
             return Ok(config.clone());
         }
 
-        let ip = self.resolve_host(CF_DOH_HOST)?;
-        println!("[ECH] {CF_DOH_HOST} -> {ip}, GREASE...");
-        let config = grease_ech(ip)?;
-        println!("[ECH] {} bytes", config.len());
-        *self.config.lock() = Some(config.clone());
-        Ok(config)
+        // try each CF DoH IP until GREASE succeeds
+        for &ip in &self.cf_ips {
+            match grease_ech(ip) {
+                Ok(config) => {
+                    println!("[ECH] {CF_DOH_HOST} -> {ip}, GREASE {} bytes", config.len());
+                    *self.config.lock() = Some(config.clone());
+                    return Ok(config);
+                }
+                Err(err) => {
+                    eprintln!("[ECH] {CF_DOH_HOST} -> {ip}: {err}");
+                }
+            }
+        }
+        Err(io::Error::new(io::ErrorKind::Other, "all CF DoH IPs failed for GREASE"))
     }
 
     pub fn get_ip(&self, host: &str) -> io::Result<Ipv4Addr> {
@@ -92,20 +108,20 @@ impl EchCache {
             return Ok(*ip);
         }
 
-        let ip = match self.resolve_via_ech(host) {
+        let ip = match self.resolve_via_ech_multi(host) {
             Ok(ip) => {
                 println!("[DNS] {host} -> {ip} (ECH)");
                 ip
             }
             Err(err) => {
                 eprintln!("[DNS] ECH: {err}");
-                match self.resolve_host(host) {
+                match self.resolve_host_multi(host) {
                     Ok(ip) => {
-                        println!("[DNS] {host} -> {ip} ({})", self.dns);
+                        println!("[DNS] {host} -> {ip} (multi-server)");
                         ip
                     }
                     Err(doh_err) => {
-                        eprintln!("[DNS] DoH: {doh_err}");
+                        eprintln!("[DNS] multi: {doh_err}");
                         return self.fallback_or_err(host);
                     }
                 }
@@ -128,6 +144,10 @@ impl EchCache {
         self.config.lock().take();
     }
 
+    pub fn invalidate_ip(&self, host: &str) {
+        self.ips.lock().remove(host);
+    }
+
     fn fallback_or_err(&self, host: &str) -> io::Result<Ipv4Addr> {
         if let Some(&ip) = self.hosts.get(host) {
             println!("[DNS] {host} -> {ip} (hosts fallback)");
@@ -141,48 +161,46 @@ impl EchCache {
         Ok(ip)
     }
 
-    fn resolve_host(&self, host: &str) -> io::Result<Ipv4Addr> {
-        if self.dns.starts_with("http") {
-            let base = self
-                .dns
-                .trim_start_matches("https://")
-                .trim_start_matches("http://");
-            let (doh_host, path) = base
-                .split_once('/')
-                .map(|(host, path)| (host, format!("/{path}")))
-                .unwrap_or((base, "/dns-query".into()));
-            let json = doh_json(doh_host, &format!("{path}?name={host}&type=A"))?;
-            parse_a(&json).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no A"))
-        } else {
-            let server = if self.dns.parse::<Ipv4Addr>().is_ok() {
-                self.dns.clone()
-            } else {
-                format!("{}:53", self.dns)
-                    .to_socket_addrs()?
-                    .find(|addr| addr.is_ipv4())
-                    .map(|addr| addr.ip().to_string())
-                    .ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::NotFound, "can't resolve DNS server")
-                    })?
-            };
-            resolve_plain_dns(&server, host)
-        }
+    fn resolve_host_multi(&self, host: &str) -> io::Result<Ipv4Addr> {
+        resolve_multi(host, &self.dns_servers)
     }
 
-    fn resolve_via_ech(&self, host: &str) -> io::Result<Ipv4Addr> {
+    fn resolve_via_ech_multi(&self, host: &str) -> io::Result<Ipv4Addr> {
         let ecl = self.get_ech()?;
-        let mut backend = connect_ech(CF_DOH_HOST, CF_DOH_IP, &ecl)?;
-        backend.write_all(format!("GET /dns-query?name={host}&type=A HTTP/1.1\r\nHost: {CF_DOH_HOST}\r\nAccept: application/dns-json\r\nConnection: close\r\n\r\n").as_bytes())?;
-        backend.flush()?;
 
-        let mut buf = Vec::new();
-        backend.read_to_end(&mut buf)?;
-        let header_end = buf
-            .windows(4)
-            .position(|w| w == b"\r\n\r\n")
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no hdr"))?;
-        parse_a(&String::from_utf8_lossy(&buf[header_end + 4..]))
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no A"))
+        let doh_query = |ip: Ipv4Addr| -> io::Result<Ipv4Addr> {
+            let mut backend = connect_ech(CF_DOH_HOST, ip, &ecl)?;
+            backend.write_all(
+                format!("GET /dns-query?name={host}&type=A HTTP/1.1\r\nHost: {CF_DOH_HOST}\r\nAccept: application/dns-json\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )?;
+            backend.flush()?;
+
+            let mut buf = Vec::new();
+            backend.read_to_end(&mut buf)?;
+            let header_end = buf
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no hdr"))?;
+            parse_a(&String::from_utf8_lossy(&buf[header_end + 4..]))
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no A"))
+        };
+
+        // try each CF IP, and for each CF IP try each DNS server path
+        let mut last_err = None;
+        for &cf_ip in &self.cf_ips {
+            match doh_query(cf_ip) {
+                Ok(ip) => return Ok(ip),
+                Err(err) => {
+                    eprintln!("[ECH] DNS via {cf_ip}: {err}");
+                    last_err = Some(err);
+                }
+            }
+        }
+
+        // all CF IPs failed — invalidate ECH config for next retry
+        self.invalidate();
+        Err(last_err.unwrap_or_else(|| io::Error::new(io::ErrorKind::Other, "all CF IPs failed")))
     }
 }
 

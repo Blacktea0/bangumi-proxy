@@ -34,7 +34,7 @@ fn main() -> io::Result<()> {
     println!("╠══════════════════════════════════════════════════════════════╣");
     println!("║  代理: http://{addr:<44}║");
     println!("║  站点: chii.in / lain.bgm.tv / bgm.tv / next.bgm.tv       ║");
-    println!("║  DNS:  {:<52} ║", args.dns);
+    println!("║  DNS:  {:<52} ║", args.dns.join(", "));
     println!(
         "║  hosts:{:<52} ║",
         args.hosts.as_deref().unwrap_or("(none)")

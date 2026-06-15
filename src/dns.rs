@@ -80,6 +80,64 @@ pub fn resolve_plain_dns(server: &str, host: &str) -> io::Result<Ipv4Addr> {
     Err(io::Error::new(io::ErrorKind::NotFound, "no A"))
 }
 
+pub fn resolve_multi(host: &str, servers: &[String]) -> io::Result<Ipv4Addr> {
+    for server in servers {
+        if is_doh(server) {
+            if let Ok(ip) = resolve_doh_server(server, host) {
+                return Ok(ip);
+            }
+        } else if is_plain_dns(server) {
+            if let Ok(ip) = resolve_plain_server(server, host) {
+                return Ok(ip);
+            }
+        } else {
+            // unknown format — try both
+            if let Ok(ip) = resolve_doh_server(server, host) {
+                return Ok(ip);
+            }
+            if let Ok(ip) = resolve_plain_server(server, host) {
+                return Ok(ip);
+            }
+        }
+    }
+    system_dns(host)
+}
+
+fn is_doh(s: &str) -> bool {
+    s.starts_with("http://") || s.starts_with("https://")
+}
+
+fn is_plain_dns(s: &str) -> bool {
+    s.parse::<Ipv4Addr>().is_ok() || s.contains(':')
+}
+
+fn resolve_doh_server(server: &str, host: &str) -> io::Result<Ipv4Addr> {
+    let base = server
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let (doh_host, path) = base
+        .split_once('/')
+        .map(|(host, path)| (host, format!("/{path}")))
+        .unwrap_or((base, "/dns-query".into()));
+    let json = doh_json(doh_host, &format!("{path}?name={host}&type=A"))?;
+    parse_a(&json).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no A"))
+}
+
+fn resolve_plain_server(server: &str, host: &str) -> io::Result<Ipv4Addr> {
+    let addr = if server.parse::<Ipv4Addr>().is_ok() {
+        server.to_string()
+    } else {
+        format!("{}:53", server)
+            .to_socket_addrs()?
+            .find(|addr| addr.is_ipv4())
+            .map(|addr| addr.ip().to_string())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "can't resolve DNS server")
+            })?
+    };
+    resolve_plain_dns(&addr, host)
+}
+
 pub fn system_dns(host: &str) -> io::Result<Ipv4Addr> {
     for server in &["119.29.29.29", "223.5.5.5"] {
         if let Ok(ip) = resolve_plain_dns(server, host) {

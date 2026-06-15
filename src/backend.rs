@@ -10,21 +10,46 @@ pub fn open_backend(
     host: &str,
     cache: &EchCache,
 ) -> io::Result<openssl::ssl::SslStream<TcpStream>> {
-    let ip = cache.get_ip(host)?;
-    if is_cloudflare_ip(ip) {
-        if let Ok(ecl) = cache.get_ech() {
-            match connect_ech(host, ip, &ecl) {
-                Ok(stream) => return Ok(stream),
-                Err(err) => {
-                    eprintln!("[ECH] {host} -> {ip}: {err}");
-                }
+    let max_retries = 2;
+    let mut last_err = None;
+
+    for attempt in 0..max_retries {
+        let ip = match cache.get_ip(host) {
+            Ok(ip) => ip,
+            Err(err) => {
+                eprintln!("[backend] {host} resolve failed (attempt {}): {err}", attempt + 1);
+                last_err = Some(err);
+                cache.invalidate_ip(host);
+                continue;
             }
-            cache.invalidate();
+        };
+
+        // try ECH first for CF IPs
+        if is_cloudflare_ip(ip) {
+            if let Ok(ecl) = cache.get_ech() {
+                match connect_ech(host, ip, &ecl) {
+                    Ok(stream) => return Ok(stream),
+                    Err(err) => {
+                        eprintln!("[ECH] {host} -> {ip}: {err} (attempt {})", attempt + 1);
+                    }
+                }
+                cache.invalidate();
+            }
+        }
+
+        // fall back to direct TLS
+        let connect_ip = cache.hosts.get(host).copied();
+        match connect_direct(host, connect_ip) {
+            Ok(stream) => return Ok(stream),
+            Err(err) => {
+                eprintln!("[TLS] {host} direct failed (attempt {}): {err}", attempt + 1);
+                last_err = Some(err);
+                cache.invalidate_ip(host);
+            }
         }
     }
 
-    let connect_ip = cache.hosts.get(host).copied();
-    connect_direct(host, connect_ip)
+    Err(last_err.unwrap_or_else(|| io::Error::new(io::ErrorKind::Other, "all connection attempts failed")))
 }
 
 /// Direct TLS connection (no ECH). If `connect_ip` is given, connect to that IP directly.
