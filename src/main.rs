@@ -692,15 +692,12 @@ fn main() -> io::Result<()> {
     }
     let hosts = match &args.hosts { Some(path) => parse_hosts(path), None => std::collections::HashMap::new() };
 
-    println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║  bangumi-proxy — HTTP/HTTPS + ECH proxy                     ║");
-    println!("╠══════════════════════════════════════════════════════════════╣");
-    println!("║  Proxy: http://{addr:<43}║");
-    println!("║  Sites: chii.in / lain.bgm.tv / bgm.tv / next.bgm.tv      ║");
-    println!("║  DNS:   {:<52}║", args.dns);
-    println!("║  Hosts: {:<52}║", args.hosts.as_deref().unwrap_or("(none)"));
-    println!("║  MITM:  Self-signed CA, HTTPS enabled                       ║");
-    println!("╚══════════════════════════════════════════════════════════════╝\n");
+    println!("bangumi-proxy - HTTP/HTTPS + ECH proxy");
+    println!("  Proxy: http://{addr}");
+    println!("  Sites: chii.in / lain.bgm.tv / bgm.tv / next.bgm.tv");
+    println!("  DNS:   {}", args.dns);
+    println!("  Hosts: {}", args.hosts.as_deref().unwrap_or("(none)"));
+    println!("  MITM:  Self-signed CA, HTTPS enabled\n");
 
     let cache = Arc::new(EchCache::new(args.dns.clone(), hosts));
     let listener = TcpListener::bind(&addr)?;
