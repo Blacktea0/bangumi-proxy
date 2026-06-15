@@ -50,19 +50,19 @@ struct Args {
     #[arg(short, long, default_value_t = 8080)] port: u16,
     #[arg(short, long)] browser: bool,
     #[arg(short, long, default_value = "https://bgm.tv")] url: String,
-    /// 使用 Chrome（可选指定路径）
+    /// Use Chrome (optional custom path)
     #[arg(long, num_args = 0..=1, default_missing_value = "")] chrome: Option<Option<String>>,
-    /// 使用 Chromium（可选指定路径）
+    /// Use Chromium (optional custom path)
     #[arg(long, num_args = 0..=1, default_missing_value = "")] chromium: Option<Option<String>>,
-    /// 使用 Edge（可选指定路径）
+    /// Use Edge (optional custom path)
     #[arg(long, num_args = 0..=1, default_missing_value = "")] edge: Option<Option<String>>,
-    /// 使用 Firefox（可选指定路径）
+    /// Use Firefox (optional custom path)
     #[arg(long, num_args = 0..=1, default_missing_value = "")] firefox: Option<Option<String>>,
     /// DoH URL or plain DNS IP
     #[arg(long, default_value = "https://doh.pub/dns-query")] dns: String,
-    /// 自定义 hosts 文件路径（标准格式：IP domain）
+    /// Custom hosts file path (standard format: IP domain)
     #[arg(long)] hosts: Option<String>,
-    /// 安装 CA 证书到系统信任根证书（首次使用或证书过期时运行）
+    /// Install CA certificate to system trust store (run on first use or when certificate expires)
     #[arg(long)] trust_ca: bool,
 }
 
@@ -104,8 +104,8 @@ impl MitmCa {
     }
 }
 
-/// 信任 CA 证书，返回 true 表示已信任（无需操作）。
-/// prompt=true: 交互模式 (--trust-ca)，未信任时提示安装；prompt=false: 静默检查，未信任只打印警告。
+/// Trust CA certificate. Returns true if already trusted (no action needed).
+/// prompt=true: interactive mode (--trust-ca), prompts to install if untrusted; prompt=false: silent check, only prints warning if untrusted.
 fn trust_ca(prompt: bool) -> bool {
     let dir = std::env::current_dir().unwrap_or_default();
     let ca_pem = dir.join("ca.pem");
@@ -693,13 +693,13 @@ fn main() -> io::Result<()> {
     let hosts = match &args.hosts { Some(path) => parse_hosts(path), None => std::collections::HashMap::new() };
 
     println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║  bangumi-proxy — HTTP/HTTPS + ECH 绕过 GFW                  ║");
+    println!("║  bangumi-proxy — HTTP/HTTPS + ECH proxy                     ║");
     println!("╠══════════════════════════════════════════════════════════════╣");
-    println!("║  代理: http://{addr:<44}║");
-    println!("║  站点: chii.in / lain.bgm.tv / bgm.tv / next.bgm.tv       ║");
-    println!("║  DNS:  {:<52} ║", args.dns);
-    println!("║  hosts:{:<52} ║", args.hosts.as_deref().unwrap_or("(none)"));
-    println!("║  MITM: 自签 CA，支持 HTTPS                                  ║");
+    println!("║  Proxy: http://{addr:<43}║");
+    println!("║  Sites: chii.in / lain.bgm.tv / bgm.tv / next.bgm.tv      ║");
+    println!("║  DNS:   {:<52}║", args.dns);
+    println!("║  Hosts: {:<52}║", args.hosts.as_deref().unwrap_or("(none)"));
+    println!("║  MITM:  Self-signed CA, HTTPS enabled                       ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
 
     let cache = Arc::new(EchCache::new(args.dns.clone(), hosts));
