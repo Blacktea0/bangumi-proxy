@@ -30,17 +30,18 @@ const TARGETS: &[&str] = &["chii.in", "lain.bgm.tv", "bgm.tv", "next.bgm.tv"];
 const CF_DOH_IP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(104, 16, 248, 249);
 const CF_DOH_HOST: &str = "cloudflare-dns.com";
 
-/// Hardcoded Cloudflare IPs for target domains (queried via CF DoH through system proxy).
-/// Used when live DNS returns non-Cloudflare IPs (GFW DNS poisoning).
-const CF_HOSTS: &[(&str, &[std::net::Ipv4Addr])] = &[
-    ("chii.in", &[std::net::Ipv4Addr::new(172, 67, 201, 187), std::net::Ipv4Addr::new(104, 21, 93, 3)]),
-    ("lain.bgm.tv", &[std::net::Ipv4Addr::new(172, 67, 73, 67), std::net::Ipv4Addr::new(104, 26, 8, 23), std::net::Ipv4Addr::new(104, 26, 9, 23)]),
-    ("bgm.tv", &[std::net::Ipv4Addr::new(172, 67, 73, 67), std::net::Ipv4Addr::new(104, 26, 9, 23), std::net::Ipv4Addr::new(104, 26, 8, 23)]),
-    ("next.bgm.tv", &[std::net::Ipv4Addr::new(104, 26, 8, 23), std::net::Ipv4Addr::new(104, 26, 9, 23), std::net::Ipv4Addr::new(172, 67, 73, 67)]),
-];
-
-fn lookup_cf_host(host: &str) -> Option<std::net::Ipv4Addr> {
-    CF_HOSTS.iter().find(|(h, _)| *h == host).and_then(|(_, ips)| ips.first().copied())
+/// Parse a standard hosts file (IP domain1 [domain2 ...]).
+fn parse_hosts(path: &str) -> std::collections::HashMap<String, std::net::Ipv4Addr> {
+    let mut map = std::collections::HashMap::new();
+    let data = match std::fs::read_to_string(path) { Ok(d) => d, Err(e) => { eprintln!("[hosts] {path}: {e}"); return map; } };
+    for line in data.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() { continue; }
+        let mut parts = line.split_whitespace();
+        let ip: std::net::Ipv4Addr = match parts.next().and_then(|s| s.parse().ok()) { Some(ip) => ip, None => continue };
+        for domain in parts { map.insert(domain.to_lowercase(), ip); }
+    }
+    map
 }
 
 #[derive(Parser, Debug)]
@@ -52,8 +53,8 @@ struct Args {
     #[arg(long)] chrome: Option<String>,
     /// DoH URL or plain DNS IP
     #[arg(long, default_value = "https://doh.pub/dns-query")] dns: String,
-    /// 直接指定目标 Cloudflare IP，跳过 DNS
-    #[arg(long)] ip: Option<String>,
+    /// 自定义 hosts 文件路径（标准格式：IP domain）
+    #[arg(long)] hosts: Option<String>,
 }
 
 fn is_target(host: &str) -> bool { TARGETS.iter().any(|&t| host == t || host.ends_with(&format!(".{t}"))) }
@@ -100,11 +101,11 @@ struct EchCache {
     config: Mutex<Option<Vec<u8>>>,
     ips: Mutex<std::collections::HashMap<String, std::net::Ipv4Addr>>,
     dns: String,
-    fixed_ip: Option<std::net::Ipv4Addr>,
+    hosts: std::collections::HashMap<String, std::net::Ipv4Addr>,
 }
 impl EchCache {
-    fn new(dns: String, fixed_ip: Option<std::net::Ipv4Addr>) -> Self {
-        Self { config: Mutex::new(None), ips: Mutex::new(std::collections::HashMap::new()), dns, fixed_ip }
+    fn new(dns: String, hosts: std::collections::HashMap<String, std::net::Ipv4Addr>) -> Self {
+        Self { config: Mutex::new(None), ips: Mutex::new(std::collections::HashMap::new()), dns, hosts }
     }
     fn get_ech(&self) -> io::Result<Vec<u8>> {
         if let Some(c) = &*self.config.lock() { return Ok(c.clone()); }
@@ -116,30 +117,29 @@ impl EchCache {
         Ok(c)
     }
     fn get_ip(&self, host: &str) -> io::Result<std::net::Ipv4Addr> {
-        // --ip: skip DNS entirely
-        if let Some(ip) = self.fixed_ip { return Ok(ip); }
+        if let Some(ip) = self.hosts.get(host) { println!("[hosts] {host} → {ip}"); return Ok(*ip); }
         if let Some(ip) = self.ips.lock().get(host) { return Ok(*ip); }
         let ip = match self.resolve_via_ech(host) {
             Ok(ip) => { println!("[DNS] {host} → {ip} (ECH)"); ip }
             Err(e) => { eprintln!("[DNS] ECH: {e}"); match self.resolve_host(host) {
                 Ok(ip) => { println!("[DNS] {host} → {ip} ({})", self.dns); ip }
-                Err(e2) => { eprintln!("[DNS] DoH: {e2}"); return self.cf_hosts_or_err(host); }
+                Err(e2) => { eprintln!("[DNS] DoH: {e2}"); return self.fallback_or_err(host); }
             }}
         };
-        // If DNS returned a non-Cloudflare IP, it's likely poisoned — use hardcoded CF IP
-        if !is_cloudflare_ip(ip) {
-            if let Some(cf_ip) = lookup_cf_host(host) {
-                eprintln!("[DNS] {host} → {ip} (poisoned! using cached {cf_ip})");
-                self.ips.lock().insert(host.to_string(), cf_ip);
-                return Ok(cf_ip);
+        // If DNS returned a non-Cloudflare IP for a target domain, it's likely poisoned — use hosts IP
+        if !is_cloudflare_ip(ip) && is_target(host) {
+            if let Some(&hosts_ip) = self.hosts.get(host) {
+                eprintln!("[DNS] {host} → {ip} (poisoned! using hosts {hosts_ip})");
+                self.ips.lock().insert(host.to_string(), hosts_ip);
+                return Ok(hosts_ip);
             }
         }
         self.ips.lock().insert(host.to_string(), ip);
         Ok(ip)
     }
-    fn cf_hosts_or_err(&self, host: &str) -> io::Result<std::net::Ipv4Addr> {
-        if let Some(ip) = lookup_cf_host(host) {
-            println!("[DNS] {host} → {ip} (hardcoded)");
+    fn fallback_or_err(&self, host: &str) -> io::Result<std::net::Ipv4Addr> {
+        if let Some(&ip) = self.hosts.get(host) {
+            println!("[DNS] {host} → {ip} (hosts fallback)");
             self.ips.lock().insert(host.to_string(), ip);
             return Ok(ip);
         }
@@ -175,8 +175,7 @@ impl EchCache {
         let h = buf.windows(4).position(|w| w == b"\r\n\r\n").ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no hdr"))?;
         parse_a(&String::from_utf8_lossy(&buf[h+4..])).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no A"))
     }
-    fn set_ip(&self, host: &str, ip: std::net::Ipv4Addr) { self.ips.lock().insert(host.to_string(), ip); }
-     fn invalidate(&self) { self.config.lock().take(); }
+    fn invalidate(&self) { self.config.lock().take(); }
 }
 
 // ============================= DNS =========================================
@@ -264,8 +263,8 @@ fn connect_ech(host: &str, ip: std::net::Ipv4Addr, ecl: &[u8]) -> io::Result<ope
 fn connect_ech(_host: &str, _ip: std::net::Ipv4Addr, _ecl: &[u8]) -> io::Result<openssl::ssl::SslStream<TcpStream>> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "ECH not available"))
 }
-/// Direct TLS connection (no ECH) for non-Cloudflare domains.
-fn connect_direct(host: &str) -> io::Result<openssl::ssl::SslStream<TcpStream>> {
+/// Direct TLS connection (no ECH). If `connect_ip` is given, connect to that IP directly.
+fn connect_direct(host: &str, connect_ip: Option<std::net::Ipv4Addr>) -> io::Result<openssl::ssl::SslStream<TcpStream>> {
     INIT.call_once(|| openssl::init());
     let mut ctx = openssl::ssl::SslContext::builder(openssl::ssl::SslMethod::tls_client()).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
     ctx.set_verify(openssl::ssl::SslVerifyMode::NONE);
@@ -273,11 +272,12 @@ fn connect_direct(host: &str) -> io::Result<openssl::ssl::SslStream<TcpStream>> 
     let ssl = openssl::ssl::Ssl::new(&ctx).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
     let host_c = std::ffi::CString::new(host).unwrap();
     unsafe { openssl_sys::SSL_set_tlsext_host_name(ssl.as_ptr(), host_c.as_ptr() as *mut _) };
-    let tcp = TcpStream::connect(format!("{host}:443"))?;
+    let addr = match connect_ip { Some(ip) => format!("{ip}:443"), None => format!("{host}:443") };
+    let tcp = TcpStream::connect(&addr)?;
     tcp.set_read_timeout(Some(std::time::Duration::from_secs(15)))?;
     tcp.set_write_timeout(Some(std::time::Duration::from_secs(15)))?;
     let st = ssl.connect(tcp).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-    println!("[TLS] {host} (direct)");
+    println!("[TLS] {host} → {addr} (direct)");
     Ok(st)
 }
 
@@ -285,26 +285,16 @@ fn open_backend(host: &str, cache: &EchCache) -> io::Result<openssl::ssl::SslStr
     let ip = cache.get_ip(host)?;
     if is_cloudflare_ip(ip) {
         if let Ok(ecl) = cache.get_ech() {
-            // Try cached IP first, then rotate through hardcoded CF IPs
-            let mut tried = vec![ip];
-            match connect_ech(host, ip, &ecl) { Ok(s) => return Ok(s), Err(e) => { eprintln!("[ECH] {host} → {ip}: {e}"); } }
-            if let Some(ips) = cf_hosts_list(host) {
-                for &alt in ips {
-                    if tried.contains(&alt) { continue; }
-                    tried.push(alt);
-                    match connect_ech(host, alt, &ecl) { Ok(s) => { cache.set_ip(host, alt); return Ok(s); } Err(e) => { eprintln!("[ECH] {host} → {alt}: {e}"); } }
-                }
+            match connect_ech(host, ip, &ecl) {
+                Ok(s) => return Ok(s),
+                Err(e) => { eprintln!("[ECH] {host} → {ip}: {e}"); }
             }
             cache.invalidate();
         }
-    } else if is_target(host) {
-        println!("[open] {host} → {ip} (not Cloudflare, direct TLS)");
     }
-    connect_direct(host)
-}
-
-fn cf_hosts_list(host: &str) -> Option<&'static [std::net::Ipv4Addr]> {
-    CF_HOSTS.iter().find(|(h, _)| *h == host).map(|(_, ips)| *ips)
+    // Direct TLS — pass IP if it came from hosts file so we bypass DNS
+    let connect_ip = cache.hosts.get(host).copied();
+    connect_direct(host, connect_ip)
 }
 
 fn is_cloudflare_ip(ip: std::net::Ipv4Addr) -> bool {
@@ -327,17 +317,16 @@ fn is_cloudflare_ip(ip: std::net::Ipv4Addr) -> bool {
 
 fn handle_connect(client: &mut TcpStream, host: &str, cache: &EchCache, ps: &str, ca: &MitmCa) {
     if is_target(host) {
-        // Target domain: MITM TLS + ECH
         handle_mitm(client, host, cache, ps, ca);
     } else {
-        // Other domain: raw tunnel (no MITM, no ECH)
-        handle_tunnel(client, host, ps);
+        handle_tunnel(client, host, cache, ps);
     }
 }
 
 /// Raw TCP tunnel — relay bytes between browser and remote server without decryption.
-fn handle_tunnel(client: &mut TcpStream, host: &str, ps: &str) {
-    let mut remote = match TcpStream::connect(format!("{host}:443")) {
+fn handle_tunnel(client: &mut TcpStream, host: &str, cache: &EchCache, ps: &str) {
+    let connect_addr = cache.hosts.get(host).map(|ip| format!("{ip}:443")).unwrap_or_else(|| format!("{host}:443"));
+    let mut remote = match TcpStream::connect(&connect_addr) {
         Ok(s) => s,
         Err(e) => { eprintln!("[{ps}] tunnel {host}: {e}"); return; }
     };
@@ -345,7 +334,7 @@ fn handle_tunnel(client: &mut TcpStream, host: &str, ps: &str) {
     remote.set_write_timeout(Some(std::time::Duration::from_secs(60))).ok();
     let _ = client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n");
     let _ = client.flush();
-    println!("[{ps}] TUNNEL {host}:443");
+    println!("[{ps}] TUNNEL {host} → {connect_addr}");
 
     client.set_nonblocking(true).ok();
     remote.set_nonblocking(true).ok();
@@ -357,8 +346,6 @@ fn handle_tunnel(client: &mut TcpStream, host: &str, ps: &str) {
     }
     client.set_nonblocking(false).ok();
 }
-
-/// MITM TLS — decrypt browser TLS, forward via ECH to Cloudflare backend.
 fn handle_mitm(client: &mut TcpStream, host: &str, cache: &EchCache, ps: &str, ca: &MitmCa) {
     let mut backend = match open_backend(host, cache) { Ok(s) => s, Err(e) => { eprintln!("[{ps}] backend: {e}"); return; } };
     let _ = client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n"); let _ = client.flush();
@@ -465,18 +452,19 @@ fn main() -> io::Result<()> {
     let args = Args::parse();
     let addr = format!("127.0.0.1:{}", args.port);
     let ca = Arc::new(MitmCa::load_or_generate());
-    let fixed_ip = args.ip.as_ref().and_then(|s| s.parse().ok());
+    let hosts = match &args.hosts { Some(path) => parse_hosts(path), None => std::collections::HashMap::new() };
 
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║  bangumi-proxy — HTTP/HTTPS + ECH 绕过 GFW                  ║");
     println!("╠══════════════════════════════════════════════════════════════╣");
     println!("║  代理: http://{addr:<44}║");
     println!("║  站点: chii.in / lain.bgm.tv / bgm.tv / next.bgm.tv       ║");
-    println!("║  DNS:  {:<52} ║", if fixed_ip.is_some() { format!("fixed → {}", args.ip.as_deref().unwrap()) } else { args.dns.clone() });
+    println!("║  DNS:  {:<52} ║", args.dns);
+    println!("║  hosts:{:<52} ║", args.hosts.as_deref().unwrap_or("(none)"));
     println!("║  MITM: 自签 CA，支持 HTTPS                                  ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
 
-    let cache = Arc::new(EchCache::new(args.dns.clone(), fixed_ip));
+    let cache = Arc::new(EchCache::new(args.dns.clone(), hosts));
     let listener = TcpListener::bind(&addr)?;
     println!("[proxy] Listening on {addr}\n");
 

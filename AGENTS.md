@@ -59,6 +59,8 @@ Options:
   -b, --browser          启动浏览器并自动配置代理
   -u, --url <URL>        浏览器启动后打开的 URL [default: http://chii.in]
       --chrome <CHROME>  Chrome 可执行文件路径（留空自动检测）
+      --dns <DNS>        DoH URL 或纯 DNS IP [default: https://doh.pub/dns-query]
+      --hosts <HOSTS>    自定义 hosts 文件路径（标准格式：IP domain）
 ```
 
 ### Examples
@@ -73,8 +75,11 @@ cargo run -- --browser --url http://bgm.tv
 # Custom port
 cargo run -- --port 9090
 
+# Use custom hosts file (CF IPs → ECH, others → direct)
+cargo run -- --hosts ./my_hosts.txt
+
 # All options
-cargo run -- -b -p 9090 -u http://lain.bgm.tv
+cargo run -- -b -p 9090 -u http://lain.bgm.tv --hosts ./hosts
 ```
 
 ## Development
