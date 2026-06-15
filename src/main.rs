@@ -29,18 +29,13 @@ fn main() -> io::Result<()> {
         .map(hosts::parse_hosts)
         .unwrap_or_default();
 
-    println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║  bangumi-proxy — HTTP/HTTPS + ECH 绕过 GFW                  ║");
-    println!("╠══════════════════════════════════════════════════════════════╣");
-    println!("║  代理: http://{addr:<44}║");
-    println!("║  站点: chii.in / lain.bgm.tv / bgm.tv / next.bgm.tv       ║");
-    println!("║  DNS:  {:<52} ║", args.dns.join(", "));
-    println!(
-        "║  hosts:{:<52} ║",
-        args.hosts.as_deref().unwrap_or("(none)")
-    );
-    println!("║  MITM: 自签 CA，支持 HTTPS                                  ║");
-    println!("╚══════════════════════════════════════════════════════════════╝\n");
+    println!("bangumi-proxy — HTTP/HTTPS + ECH proxy");
+    println!("  Proxy:  http://{addr}");
+    println!("  Sites:  chii.in / lain.bgm.tv / bgm.tv / next.bgm.tv");
+    println!("  DNS:    {}", args.dns.join(", "));
+    println!("  Hosts:  {}", args.hosts.as_deref().unwrap_or("(none)"));
+    println!("  MITM:   self-signed CA, HTTPS enabled");
+    println!("  Cert:   {}", std::env::current_dir().unwrap_or_default().join("ca.pem").display());
 
     let cache = Arc::new(EchCache::new(args.dns.clone(), hosts));
     let listener = TcpListener::bind(&addr)?;
