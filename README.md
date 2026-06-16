@@ -274,8 +274,8 @@ build.rs         Detects OpenSSL ECH headers and compiles the C helper
 - Target HTTPS sites require the local CA to be trusted, otherwise browsers will
   show certificate warnings.
 - `ca-key.pem` is the local CA private key. Do not upload, share, or commit it.
-- If the OpenSSL build does not include ECH support, the program can still build,
-  but ECH connections will not be available.
+- OpenSSL ECH support is required. Builds fail if `openssl/ech.h` cannot be
+  found through `OPENSSL_DIR` / `OPENSSL_INCLUDE_DIR` or the system OpenSSL path.
 
 ## License
 

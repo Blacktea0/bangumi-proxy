@@ -3,14 +3,12 @@ use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, TcpStream};
 
 use foreign_types_shared::ForeignType;
-#[cfg(has_ech)]
 use foreign_types_shared::ForeignTypeRef;
 use parking_lot::Mutex;
 
 use crate::dns::{parse_a, resolve_multi, system_dns};
 use crate::targets::{is_cloudflare_ip, is_target};
 
-#[cfg(has_ech)]
 const OUTER_SNI: &str = "cloudflare-ech.com";
 
 pub const CF_DOH_IPS: &[Ipv4Addr] = &[
@@ -23,7 +21,6 @@ pub const CF_DOH_HOST: &str = "cloudflare-dns.com";
 
 static INIT: std::sync::Once = std::sync::Once::new();
 
-#[cfg(has_ech)]
 unsafe extern "C" {
     fn ech_get_retry_config(
         host: *const std::os::raw::c_char,
@@ -35,7 +32,6 @@ unsafe extern "C" {
     fn ech_free(p: *mut std::os::raw::c_void);
 }
 
-#[cfg(has_ech)]
 mod ffi {
     use std::os::raw::{c_char, c_int};
 
@@ -96,7 +92,10 @@ impl EchCache {
                 }
             }
         }
-        Err(io::Error::new(io::ErrorKind::Other, "all CF DoH IPs failed for GREASE"))
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            "all CF DoH IPs failed for GREASE",
+        ))
     }
 
     pub fn get_ip(&self, host: &str) -> io::Result<Ipv4Addr> {
@@ -204,7 +203,6 @@ impl EchCache {
     }
 }
 
-#[cfg(has_ech)]
 fn grease_ech(ip: Ipv4Addr) -> io::Result<Vec<u8>> {
     let host = std::ffi::CString::new(ip.to_string()).unwrap();
     let outer_sni = std::ffi::CString::new(OUTER_SNI).unwrap();
@@ -228,15 +226,6 @@ fn grease_ech(ip: Ipv4Addr) -> io::Result<Vec<u8>> {
     }
 }
 
-#[cfg(no_ech)]
-fn grease_ech(_ip: Ipv4Addr) -> io::Result<Vec<u8>> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "ECH not available: build with OpenSSL 4.0-dev for ECH support",
-    ))
-}
-
-#[cfg(has_ech)]
 pub fn connect_ech(
     host: &str,
     ip: Ipv4Addr,
@@ -275,18 +264,6 @@ pub fn connect_ech(
     };
     println!("[ECH] {host} -> {ip} status={status}");
     Ok(stream)
-}
-
-#[cfg(no_ech)]
-pub fn connect_ech(
-    _host: &str,
-    _ip: Ipv4Addr,
-    _ecl: &[u8],
-) -> io::Result<openssl::ssl::SslStream<TcpStream>> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "ECH not available",
-    ))
 }
 
 pub fn init_openssl() {

@@ -1,8 +1,4 @@
 fn main() {
-    // Register custom cfg names to suppress unexpected_cfgs warnings
-    println!("cargo::rustc-check-cfg=cfg(has_ech)");
-    println!("cargo::rustc-check-cfg=cfg(no_ech)");
-
     if cfg!(target_os = "windows") {
         // Windows: check OPENSSL_DIR env first, fall back to scoop
         let openssl_dir = std::env::var("OPENSSL_DIR").ok().unwrap_or_else(|| {
@@ -14,23 +10,22 @@ fn main() {
         let include_dir = std::env::var("OPENSSL_INCLUDE_DIR")
             .ok()
             .unwrap_or_else(|| format!("{openssl_dir}\\include"));
-        let _lib_dir = std::env::var("OPENSSL_LIB_DIR").ok()
+        let _lib_dir = std::env::var("OPENSSL_LIB_DIR")
+            .ok()
             .unwrap_or_else(|| format!("{openssl_dir}\\lib"));
 
-        // Try to compile ECH helper
-        let ech_available =
-            std::path::Path::new(&format!("{include_dir}\\openssl\\ech.h")).exists();
-
-        if ech_available {
-            cc::Build::new()
-                .static_crt(true)
-                .file("ech_helper.c")
-                .include(&include_dir)
-                .compile("ech_helper");
-            println!("cargo:rustc-cfg=has_ech");
-        } else {
-            println!("cargo:rustc-cfg=no_ech");
+        let ech_header = format!("{include_dir}\\openssl\\ech.h");
+        if !std::path::Path::new(&ech_header).exists() {
+            panic!(
+                "OpenSSL ECH header not found at {ech_header}; install OpenSSL 4.0 with ECH support and set OPENSSL_DIR/OPENSSL_INCLUDE_DIR"
+            );
         }
+
+        cc::Build::new()
+            .static_crt(true)
+            .file("ech_helper.c")
+            .include(&include_dir)
+            .compile("ech_helper");
 
         // Let openssl-sys handle OpenSSL linking via OPENSSL_DIR env
         println!("cargo:rustc-link-lib=ws2_32");
@@ -73,21 +68,17 @@ fn main() {
             println!("cargo:rustc-env=OPENSSL_INCLUDE_DIR={openssl_include}");
         }
 
-        // Try to compile ECH helper — check ech.h for ECH APIs
-        let ech_available =
-            std::path::Path::new(&format!("{openssl_include}/openssl/ech.h")).exists();
-
-        if ech_available {
-            cc::Build::new()
-                .file("ech_helper.c")
-                .include(&openssl_include)
-                .compile("ech_helper");
-            println!("cargo:rustc-cfg=has_ech");
-            println!("[build] ECH helper compiled (OpenSSL with ECH support)");
-        } else {
-            println!("cargo:rustc-cfg=no_ech");
-            println!("[build] WARNING: ECH APIs not found — ECH features disabled");
-            println!("[build] Set OPENSSL_DIR=/opt/openssl-4.0 for ECH support");
+        let ech_header = format!("{openssl_include}/openssl/ech.h");
+        if !std::path::Path::new(&ech_header).exists() {
+            panic!(
+                "OpenSSL ECH header not found at {ech_header}; install OpenSSL 4.0 with ECH support and set OPENSSL_DIR/OPENSSL_INCLUDE_DIR"
+            );
         }
+
+        cc::Build::new()
+            .file("ech_helper.c")
+            .include(&openssl_include)
+            .compile("ech_helper");
+        println!("[build] ECH helper compiled (OpenSSL with ECH support)");
     }
 }
