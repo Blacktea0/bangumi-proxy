@@ -5,6 +5,21 @@ pub struct MitmCa {
     ca_cert: rcgen::Certificate,
 }
 
+/// Common CA certificate params with proper Subject DN and KeyUsage.
+fn ca_params() -> rcgen::CertificateParams {
+    let mut params = rcgen::CertificateParams::default();
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    params.distinguished_name = rcgen::DistinguishedName::new();
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "bangumi-proxy CA");
+    params.key_usages = vec![
+        rcgen::KeyUsagePurpose::KeyCertSign,
+        rcgen::KeyUsagePurpose::CrlSign,
+    ];
+    params
+}
+
 impl MitmCa {
     pub fn load_or_generate() -> Self {
         let cp = std::env::current_dir().unwrap_or_default().join("ca.pem");
@@ -14,9 +29,7 @@ impl MitmCa {
         if cp.exists() && kp.exists() {
             println!("[CA] Loaded from {}", cp.display());
             let key = rcgen::KeyPair::from_pem(&std::fs::read_to_string(&kp).unwrap()).unwrap();
-            let mut params =
-                rcgen::CertificateParams::new(vec!["bangumi-proxy CA".into()]).unwrap();
-            params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+            let params = ca_params();
             return Self {
                 ca_cert: params.self_signed(&key).unwrap(),
                 ca_key: key,
@@ -25,8 +38,7 @@ impl MitmCa {
 
         println!("[CA] Generating...");
         let key = rcgen::KeyPair::generate().unwrap();
-        let mut params = rcgen::CertificateParams::new(vec!["bangumi-proxy CA".into()]).unwrap();
-        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let params = ca_params();
         let cert = params.self_signed(&key).unwrap();
         std::fs::write(&cp, cert.pem()).unwrap();
         std::fs::write(&kp, key.serialize_pem()).unwrap();
@@ -42,6 +54,10 @@ impl MitmCa {
         let host_key = rcgen::KeyPair::generate().unwrap();
         let mut params = rcgen::CertificateParams::new(vec![host.into()]).unwrap();
         params.distinguished_name = rcgen::DistinguishedName::new();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, host);
+        params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
         let host_cert = params
             .signed_by(&host_key, &self.ca_cert, &self.ca_key)
             .unwrap();
