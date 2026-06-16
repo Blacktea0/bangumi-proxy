@@ -45,18 +45,38 @@ fn main() -> io::Result<()> {
     println!("  DNS:    {}", args.dns.join(", "));
     println!("  Hosts:  {}", args.hosts.as_deref().unwrap_or("(none)"));
     println!("  MITM:   self-signed CA, HTTPS enabled");
-    println!("  Cert:   {}", std::env::current_dir().unwrap_or_default().join("ca.pem").display());
+    println!(
+        "  Cert:   {}",
+        std::env::current_dir()
+            .unwrap_or_default()
+            .join("ca.pem")
+            .display()
+    );
 
     let cache = Arc::new(EchCache::new(args.dns.clone(), hosts));
     let listener = TcpListener::bind(&addr)?;
     println!("[proxy] Listening on {addr}\n");
 
     // Resolve browser launch: specific flag > -b auto-detect > gui fallback
-    let browser_req: Option<(BrowserKind, Option<String>)> =
-        args.chrome.clone().map(|p| (BrowserKind::Chrome, p.filter(|s| !s.is_empty())))
-        .or_else(|| args.chromium.clone().map(|p| (BrowserKind::Chromium, p.filter(|s| !s.is_empty()))))
-        .or_else(|| args.edge.clone().map(|p| (BrowserKind::Edge, p.filter(|s| !s.is_empty()))))
-        .or_else(|| args.firefox.clone().map(|p| (BrowserKind::Firefox, p.filter(|s| !s.is_empty()))));
+    let browser_req: Option<(BrowserKind, Option<String>)> = args
+        .chrome
+        .clone()
+        .map(|p| (BrowserKind::Chrome, p.filter(|s| !s.is_empty())))
+        .or_else(|| {
+            args.chromium
+                .clone()
+                .map(|p| (BrowserKind::Chromium, p.filter(|s| !s.is_empty())))
+        })
+        .or_else(|| {
+            args.edge
+                .clone()
+                .map(|p| (BrowserKind::Edge, p.filter(|s| !s.is_empty())))
+        })
+        .or_else(|| {
+            args.firefox
+                .clone()
+                .map(|p| (BrowserKind::Firefox, p.filter(|s| !s.is_empty())))
+        });
 
     let gui_launch = browser::is_gui_launch();
     if gui_launch {
@@ -66,10 +86,12 @@ fn main() -> io::Result<()> {
             eprintln!("[browser] No supported browser found");
         }
     } else if let Some((kind, explicit_path)) = browser_req {
-        let exe = explicit_path.or_else(|| browser::find_browser(kind)).unwrap_or_else(|| {
-            eprintln!("[browser] {} not found", kind.name());
-            std::process::exit(1);
-        });
+        let exe = explicit_path
+            .or_else(|| browser::find_browser(kind))
+            .unwrap_or_else(|| {
+                eprintln!("[browser] {} not found", kind.name());
+                std::process::exit(1);
+            });
         browser::launch_browser(kind, &exe, &addr, &args.url);
     } else if args.browser {
         if let Some((kind, exe)) = browser::auto_detect_browser() {

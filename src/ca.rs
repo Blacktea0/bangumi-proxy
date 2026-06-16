@@ -77,7 +77,9 @@ pub fn trust_ca(prompt: bool) -> bool {
         use base64::Engine;
         std::fs::write(
             &ca_der,
-            base64::engine::general_purpose::STANDARD.decode(&b64).unwrap(),
+            base64::engine::general_purpose::STANDARD
+                .decode(&b64)
+                .unwrap(),
         )
         .unwrap();
         println!("[trust] DER: {}", ca_der.display());
@@ -134,7 +136,11 @@ pub fn trust_ca(prompt: bool) -> bool {
             return false;
         }
         println!("[trust] Copy ca.pem to system trust store:");
-        println!("  sudo cp \"{}\" \"{}\"", ca_pem.display(), target.display());
+        println!(
+            "  sudo cp \"{}\" \"{}\"",
+            ca_pem.display(),
+            target.display()
+        );
         if target_dir.ends_with("anchors") {
             println!("  sudo update-ca-trust");
         } else {
@@ -169,7 +175,12 @@ pub fn trust_ca(prompt: bool) -> bool {
     #[cfg(target_os = "macos")]
     {
         let check = std::process::Command::new("security")
-            .args(["find-certificate", "-c", "bangumi-proxy CA", "/Library/Keychains/System.keychain"])
+            .args([
+                "find-certificate",
+                "-c",
+                "bangumi-proxy CA",
+                "/Library/Keychains/System.keychain",
+            ])
             .output();
         let trusted = check
             .map(|o| String::from_utf8_lossy(&o.stdout).contains("bangumi-proxy CA"))
@@ -194,8 +205,14 @@ pub fn trust_ca(prompt: bool) -> bool {
         if !buf.trim().eq_ignore_ascii_case("n") {
             match std::process::Command::new("sudo")
                 .args([
-                    "security", "add-trusted-cert", "-d", "-r", "trustRoot", "-k",
-                    "/Library/Keychains/System.keychain", ca_pem.to_str().unwrap(),
+                    "security",
+                    "add-trusted-cert",
+                    "-d",
+                    "-r",
+                    "trustRoot",
+                    "-k",
+                    "/Library/Keychains/System.keychain",
+                    ca_pem.to_str().unwrap(),
                 ])
                 .status()
             {

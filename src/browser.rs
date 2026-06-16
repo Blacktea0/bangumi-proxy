@@ -53,9 +53,11 @@ pub fn find_browser(kind: BrowserKind) -> Option<String> {
     {
         let candidates: &[&str] = match kind {
             BrowserKind::Chrome => &["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"],
-            BrowserKind::Chromium => {
-                &["/usr/bin/chromium", "/usr/bin/chromium-browser", "/snap/bin/chromium"]
-            }
+            BrowserKind::Chromium => &[
+                "/usr/bin/chromium",
+                "/usr/bin/chromium-browser",
+                "/snap/bin/chromium",
+            ],
             BrowserKind::Edge => &["/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable"],
             BrowserKind::Firefox => &["/usr/bin/firefox", "/usr/bin/firefox-esr"],
         };

@@ -131,9 +131,7 @@ fn resolve_plain_server(server: &str, host: &str) -> io::Result<Ipv4Addr> {
             .to_socket_addrs()?
             .find(|addr| addr.is_ipv4())
             .map(|addr| addr.ip().to_string())
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, "can't resolve DNS server")
-            })?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "can't resolve DNS server"))?
     };
     resolve_plain_dns(&addr, host)
 }

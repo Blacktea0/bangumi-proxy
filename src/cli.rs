@@ -22,7 +22,11 @@ pub struct Args {
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     pub firefox: Option<Option<String>>,
     /// DoH URL or plain DNS IP, comma-separated
-    #[arg(long, default_value = "https://doh.pub/dns-query", value_delimiter = ',')]
+    #[arg(
+        long,
+        default_value = "https://doh.pub/dns-query",
+        value_delimiter = ','
+    )]
     pub dns: Vec<String>,
     /// Custom hosts file path (standard format: IP domain)
     #[arg(long)]

@@ -17,7 +17,10 @@ pub fn open_backend(
         let ip = match cache.get_ip(host) {
             Ok(ip) => ip,
             Err(err) => {
-                eprintln!("[backend] {host} resolve failed (attempt {}): {err}", attempt + 1);
+                eprintln!(
+                    "[backend] {host} resolve failed (attempt {}): {err}",
+                    attempt + 1
+                );
                 last_err = Some(err);
                 cache.invalidate_ip(host);
                 continue;
@@ -42,14 +45,18 @@ pub fn open_backend(
         match connect_direct(host, connect_ip) {
             Ok(stream) => return Ok(stream),
             Err(err) => {
-                eprintln!("[TLS] {host} direct failed (attempt {}): {err}", attempt + 1);
+                eprintln!(
+                    "[TLS] {host} direct failed (attempt {}): {err}",
+                    attempt + 1
+                );
                 last_err = Some(err);
                 cache.invalidate_ip(host);
             }
         }
     }
 
-    Err(last_err.unwrap_or_else(|| io::Error::new(io::ErrorKind::Other, "all connection attempts failed")))
+    Err(last_err
+        .unwrap_or_else(|| io::Error::new(io::ErrorKind::Other, "all connection attempts failed")))
 }
 
 /// Direct TLS connection (no ECH). If `connect_ip` is given, connect to that IP directly.
