@@ -1,4 +1,4 @@
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BrowserKind {
     Chrome,
     Chromium,
@@ -116,45 +116,94 @@ pub fn auto_detect_browser() -> Option<(BrowserKind, String)> {
     None
 }
 
+/// Resolve profile directory for the browser. On Linux, snap packages cannot
+/// access `/tmp`, so we use the snap's home directory instead.
+fn browser_profile_dir(kind: BrowserKind, exe: &str) -> std::path::PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(dir) = snap_profile_dir(kind, exe) {
+            return std::path::PathBuf::from(dir);
+        }
+    }
+    let _ = (kind, exe);
+    std::env::temp_dir().join("bangumi-proxy")
+}
+
+#[cfg(target_os = "linux")]
+fn snap_profile_dir(kind: BrowserKind, exe: &str) -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    // Detect snap browsers: /snap/bin/chromium, /snap/firefox/.../firefox,
+    // or the distro wrapper scripts that delegate to snap.
+    let snap_name = if exe.starts_with("/snap/") {
+        // /snap/bin/chromium → chromium; /snap/firefox/8107/.../firefox → firefox
+        if exe.contains("firefox") {
+            "firefox"
+        } else {
+            "chromium"
+        }
+    } else if kind.is_chromium()
+        && (exe == "/usr/bin/chromium-browser" || exe == "/usr/bin/chromium")
+        && std::path::Path::new("/snap/chromium").exists()
+    {
+        "chromium"
+    } else if kind == BrowserKind::Firefox
+        && exe == "/usr/bin/firefox"
+        && std::path::Path::new("/snap/firefox").exists()
+    {
+        "firefox"
+    } else {
+        return None;
+    };
+    Some(format!("{home}/snap/{snap_name}/common/bangumi-proxy"))
+}
 pub fn launch_browser(kind: BrowserKind, exe: &str, proxy: &str, url: &str) {
-    let profile = std::env::temp_dir().join("bangumi-proxy");
+    let profile = browser_profile_dir(kind, exe);
     let profile_s = profile.display().to_string();
     println!("[browser] {} proxy=http://{proxy} url={url}", kind.name());
     println!("[browser] exe={exe}");
     println!("[browser] profile={profile_s}\n");
 
     if kind.is_chromium() {
-        match std::process::Command::new(exe)
-            .args([
-                format!("--proxy-server=http://{proxy}"),
-                "--remote-debugging-port=9222".into(),
-                "--no-first-run".into(),
-                "--no-default-browser-check".into(),
-                format!("--user-data-dir={profile_s}"),
-                "--ignore-certificate-errors".into(),
-                url.into(),
-            ])
-            .spawn()
+        let mut args = vec![
+            format!("--proxy-server=http://{proxy}"),
+            "--remote-debugging-port=9222".into(),
+            "--no-first-run".into(),
+            "--no-default-browser-check".into(),
+            format!("--user-data-dir={profile_s}"),
+            "--ignore-certificate-errors".into(),
+        ];
+        #[cfg(target_os = "linux")]
         {
+            extern "C" {
+                fn geteuid() -> u32;
+            }
+            // Chromium refuses to run as root without --no-sandbox.
+            if unsafe { geteuid() } == 0 {
+                args.push("--no-sandbox".into());
+            }
+        }
+        args.push(url.into());
+        match std::process::Command::new(exe).args(&args).spawn() {
             Ok(_) => {}
             Err(e) => eprintln!("[browser] failed to launch {}: {e}", kind.name()),
         }
     } else {
-        // Firefox: create profile with proxy prefs
+        // Firefox: create profile with proxy prefs in user.js (never
+        // overwritten by Firefox, unlike prefs.js).
+        let (host, port) = proxy.rsplit_once(':').unwrap_or(("127.0.0.1", "8080"));
         let _ = std::fs::create_dir_all(&profile);
         let _ = std::fs::write(
-            profile.join("prefs.js"),
+            profile.join("user.js"),
             format!(
                 "user_pref(\"network.proxy.type\", 1);\n\
-                 user_pref(\"network.proxy.http\", \"127.0.0.1\");\n\
+                 user_pref(\"network.proxy.http\", \"{host}\");\n\
                  user_pref(\"network.proxy.http_port\", {port});\n\
-                 user_pref(\"network.proxy.ssl\", \"127.0.0.1\");\n\
+                 user_pref(\"network.proxy.ssl\", \"{host}\");\n\
                  user_pref(\"network.proxy.ssl_port\", {port});\n\
                  user_pref(\"network.proxy.no_proxies_on\", \"\");\n\
                  user_pref(\"security.enterprise_roots.enabled\", true);\n\
                  user_pref(\"security.OCSP.enabled\", 0);\n\
                  user_pref(\"security.cert_pinning.enforcement_level\", 0);\n",
-                port = proxy.split(':').nth(1).unwrap_or("8080")
             ),
         );
         let mut cmd = std::process::Command::new(exe);
