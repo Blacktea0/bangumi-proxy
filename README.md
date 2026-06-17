@@ -18,10 +18,10 @@ use `-b` to launch a browser with the proxy already configured.
 
 - **ECH proxying**: uses OpenSSL 4.0 ECH APIs when connecting to Cloudflare IPs
 - **DNS-over-HTTPS**: supports DoH URLs and plain DNS server IPs
-- **ECH DoH resolution**: resolves target A records through Cloudflare DoH over ECH first
+- **ECH DoH resolution**: resolves target A records through Cloudflare DoH over ECH
 - **Targeted MITM**: generates per-host certificates only for Bangumi target domains
 - **Pass-through tunneling**: non-target CONNECT requests are relayed as raw TCP tunnels
-- **Custom hosts**: supports standard hosts files for overriding target IPs
+- **Custom hosts**: supports standard hosts files for non-target direct/tunnel overrides
 - **Browser launch**: auto-detects Chrome, Chromium, Edge, or Firefox and configures the proxy
 - **Local CA management**: generates a local CA and can install it with `--trust-ca`
 
@@ -29,13 +29,22 @@ use `-b` to launch a browser with the proxy already configured.
 
 ### Request Flow
 
-When the browser accesses a target site, traffic follows this path:
+When the browser accesses a target site, traffic follows one of these paths:
 
 ```text
-Browser
+HTTP:
+  Browser
   -> 127.0.0.1:10721 (bangumi-proxy)
-  -> DNS / hosts resolution
-  -> ECH TLS or direct TLS to the remote server
+  -> ECH bootstrap DNS and Cloudflare DoH over ECH
+  -> ECH TLS to the remote target server
+  -> bidirectional relay between browser and server
+
+HTTPS CONNECT:
+  Browser
+  -> 127.0.0.1:10721 (bangumi-proxy)
+  -> local MITM TLS with a generated host certificate
+  -> ECH bootstrap DNS and Cloudflare DoH over ECH
+  -> ECH TLS to the remote target server
   -> bidirectional relay between browser and server
 ```
 
@@ -43,30 +52,47 @@ Browser
 sequenceDiagram
     participant Browser
     participant Proxy as bangumi-proxy
-    participant Resolver as hosts / DNS / DoH
+    participant Resolver as DNS / Cloudflare DoH
     participant ECH as ECH config cache
     participant Server as Bangumi / Cloudflare
 
     Browser->>Proxy: HTTP request or HTTPS CONNECT
     Proxy->>Proxy: match target host
-    alt non-target host
+    alt non-target CONNECT
         Proxy->>Server: open raw TCP tunnel
         Browser->>Server: end-to-end TLS traffic
         Server-->>Browser: end-to-end TLS traffic
-    else Bangumi target host
-        Proxy-->>Browser: 200 Connection Established
-        Proxy->>Browser: local TLS with generated host cert
-        Proxy->>Resolver: resolve target IP
-        Resolver-->>Proxy: hosts entry or A records
-        opt Cloudflare IP and no cached ECH config
-            Proxy->>ECH: fetch Cloudflare ECH retry config
+    else non-target HTTP
+        Browser->>Proxy: plain HTTP request
+        Proxy->>Server: direct TLS backend
+        Server-->>Proxy: backend TLS response
+        Proxy-->>Browser: plain HTTP response
+    else target HTTP
+        Browser->>Proxy: plain HTTP request
+        opt no cached ECH config
+            Proxy->>Resolver: bootstrap Cloudflare DoH IPs with --dns
+            Resolver-->>Proxy: Cloudflare DoH IPs or built-in fallback IPs
+            Proxy->>ECH: GREASE Cloudflare DoH for retry config
             ECH-->>Proxy: ECH config list
         end
-        alt ECH available
-            Proxy->>Server: TLS with encrypted inner SNI
-        else ECH unavailable or failed
-            Proxy->>Server: direct TLS fallback
+        Proxy->>Resolver: resolve target A through Cloudflare DoH over ECH
+        Resolver-->>Proxy: Cloudflare A records
+        Proxy->>Server: ECH TLS with encrypted inner SNI
+        Proxy->>Server: HTTP request over backend TLS
+        Server-->>Proxy: HTTP response over backend TLS
+        Proxy-->>Browser: plain HTTP response
+    else target CONNECT
+        Proxy-->>Browser: 200 Connection Established
+        Proxy->>Browser: local TLS with generated host cert
+        opt no cached ECH config
+            Proxy->>Resolver: bootstrap Cloudflare DoH IPs with --dns
+            Resolver-->>Proxy: Cloudflare DoH IPs or built-in fallback IPs
+            Proxy->>ECH: GREASE Cloudflare DoH for retry config
+            ECH-->>Proxy: ECH config list
         end
+        Proxy->>Resolver: resolve target A through Cloudflare DoH over ECH
+        Resolver-->>Proxy: Cloudflare A records
+        Proxy->>Server: ECH TLS with encrypted inner SNI
         Browser->>Proxy: decrypted HTTP over local TLS
         Proxy-->>Browser: decrypted HTTP over local TLS
         Proxy->>Server: relay over backend TLS
@@ -78,9 +104,10 @@ The proxy listens on `127.0.0.1:<port>`. For each browser request, it first
 checks the request type:
 
 - Plain HTTP requests: parse `Host` and path, rebuild the request, and forward it
-  through a backend TLS connection.
-- HTTPS `CONNECT` requests: return `200 Connection Established`, then choose
-  either local MITM or raw TCP tunneling based on the host.
+  through a backend TLS connection. Target hosts use ECH TLS; non-target hosts
+  use direct TLS.
+- HTTPS `CONNECT` requests: return `200 Connection Established`, then use local
+  MITM for target hosts or raw TCP tunneling for non-target hosts.
 
 ### Target Host Matching
 
@@ -94,18 +121,24 @@ These domains and their subdomains use the Bangumi-specific path. Other domains
 are not decrypted or modified; they are forwarded as plain TCP tunnels to the
 remote `:443` endpoint.
 
+`bangumi.tv` is intentionally not included because it is not hosted behind
+Cloudflare, so the ECH path used by this proxy does not apply to that domain.
+
 ### DNS and Hosts Resolution
 
-Target IPs are resolved in this order:
+Target hosts use a strict ECH path:
 
-1. A custom hosts file from `--hosts`
-2. Cloudflare DoH queried through an ECH TLS connection
-3. DoH or plain DNS servers from `--dns`
-4. Built-in fallback DNS / system resolution
+1. Bootstrap `cloudflare-dns.com` A records with the `--dns` servers.
+2. Fall back to built-in Cloudflare DoH IPs if bootstrap DNS fails.
+3. Fetch a Cloudflare ECH retry config with a GREASE handshake.
+4. Resolve the target A records through Cloudflare DoH over ECH.
+5. Keep only Cloudflare IPs, then connect with ECH.
 
-If the resolved IP is in a Cloudflare range, the backend connection tries ECH
-first. Otherwise, it uses a direct TLS connection. IPs and ECH config lists are
-cached in memory and invalidated after connection failures.
+Target hosts do not fall back to non-ECH DNS or direct TLS. IPs and ECH config
+lists are cached in memory and invalidated after connection failures.
+
+The `--hosts` file is currently used for non-target direct TLS and raw CONNECT
+tunnels. It does not override target-host ECH resolution.
 
 ### ECH Connections
 
@@ -130,7 +163,7 @@ For HTTPS `CONNECT` requests to target domains, the proxy performs local MITM:
 1. Load or generate `ca.pem` and `ca-key.pem`
 2. Generate a temporary certificate for the requested host
 3. Establish TLS between the browser and the proxy using that certificate
-4. Establish ECH TLS or direct TLS between the proxy and the remote server
+4. Establish ECH TLS between the proxy and the remote target server
 5. Relay decrypted HTTP data between both TLS sessions
 
 Because of this, the local CA must be trusted before HTTPS target sites can be
@@ -148,10 +181,13 @@ For regular use, trusting the local CA is still recommended.
 
 Backend connections use limited retries:
 
-- ECH failures invalidate the cached ECH config and try fetching it again
-- DNS failures move on to the next resolver path
-- If ECH cannot be used, the proxy falls back to direct TLS
-- Hosts-file IPs are preferred for both resolution and connection fallback
+- Cloudflare DoH bootstrap uses `--dns`, then built-in Cloudflare IPs if needed
+- Target DNS is queried through Cloudflare DoH over ECH only
+- Target A records outside Cloudflare ranges are ignored
+- ECH timeouts try the next target IP
+- Other ECH failures invalidate the cached ECH config and target IPs
+- Non-target requests use direct TLS or raw TCP tunnels, with `--hosts`
+  overrides when present
 
 ## Installation
 
@@ -180,6 +216,17 @@ Requirements:
 pip install conan
 # or
 pipx install conan
+
+# Create a temporary Conan recipe for OpenSSL 4.0
+mkdir -p conan
+cat > conan/conanfile.txt <<'EOF'
+[requires]
+openssl/4.0.1
+[generators]
+PkgConfigDeps
+VirtualBuildEnv
+VirtualRunEnv
+EOF
 
 # Install OpenSSL 4.0
 conan profile detect --force
@@ -231,8 +278,8 @@ Options:
       --chromium [PATH]    Use Chromium (optional custom path)
       --edge [PATH]        Use Edge (optional custom path)
       --firefox [PATH]     Use Firefox (optional custom path)
-      --dns <DNS>          DoH URL or plain DNS IP [default: https://doh.pub/dns-query]
-      --hosts <HOSTS>      Custom hosts file path (standard format: IP domain)
+      --dns <DNS>          DoH URL or plain DNS IP, comma-separated [default: https://doh.pub/dns-query]
+      --hosts <HOSTS>      Custom hosts file path for non-target direct/tunnel overrides
       --trust-ca           Install CA certificate to system trust store
 ```
 
@@ -274,11 +321,12 @@ bangumi-proxy --dns https://doh.pub/dns-query,1.1.1.1,8.8.8.8
 
 ### Custom Hosts
 
-The hosts file uses the standard format:
+The hosts file uses the standard format and currently applies only to
+non-target direct TLS and raw CONNECT tunnels:
 
 ```text
-104.16.123.1 bgm.tv chii.in
-104.16.123.2 lain.bgm.tv next.bgm.tv
+203.0.113.10 example.com www.example.com
+198.51.100.20 assets.example.net
 ```
 
 Start the proxy with:
@@ -287,18 +335,20 @@ Start the proxy with:
 bangumi-proxy --hosts ./hosts
 ```
 
+Target Bangumi hosts are still resolved through Cloudflare DoH over ECH.
+
 ## Project Layout
 
 ```text
 src/main.rs      Entry point, argument parsing, listener setup, browser launch
 src/cli.rs       CLI flags and defaults
 src/proxy.rs     HTTP/HTTPS proxy handling, CONNECT, MITM, tunnels, relay loops
-src/backend.rs   Backend selection: ECH first, direct TLS fallback
+src/backend.rs   Target ECH backend and non-target direct TLS backend
 src/browser.rs   Browser discovery and launch arguments
 src/ca.rs        Local MITM CA generation, loading, and trust installation
-src/dns.rs       DoH, plain DNS, system resolution, and A record parsing
+src/dns.rs       DoH/plain DNS bootstrap and A record parsing
 src/ech.rs       ECH config caching, GREASE, and ECH TLS connections
-src/hosts.rs     Custom hosts file parsing
+src/hosts.rs     Custom hosts file parsing for non-target overrides
 src/targets.rs   Bangumi target hosts and Cloudflare IP range matching
 ech_helper.c     OpenSSL ECH GREASE helper
 build.rs         Detects OpenSSL ECH headers and compiles the C helper

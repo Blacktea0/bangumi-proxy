@@ -48,12 +48,12 @@ refactor(ech): extract GREASE ECH into C helper for Windows compat
 - `src/main.rs` — entry point, argument parsing, listener setup, browser launch
 - `src/cli.rs` — CLI flags and defaults
 - `src/proxy.rs` — HTTP/HTTPS proxy request handling and CONNECT tunneling
-- `src/backend.rs` — upstream connection selection
+- `src/backend.rs` — target ECH backend and non-target direct TLS backend
 - `src/browser.rs` — Chrome discovery and launch with proxy settings
 - `src/ca.rs` — local MITM CA loading and generation
-- `src/dns.rs` — DNS and DoH resolution
+- `src/dns.rs` — DoH/plain DNS bootstrap and A record parsing
 - `src/ech.rs` — ECH (Encrypted Client Hello) state and TLS integration
-- `src/hosts.rs` — custom hosts file parsing
+- `src/hosts.rs` — custom hosts file parsing for non-target overrides
 - `src/targets.rs` — supported Bangumi target host rules
 - `ech_helper.c` — C helper for GREASE ECH; this works around
   `openssl-sys` compatibility gaps on Windows
@@ -72,8 +72,8 @@ Options:
       --chromium [PATH]    Use Chromium (optional custom path)
       --edge [PATH]        Use Edge (optional custom path)
       --firefox [PATH]     Use Firefox (optional custom path)
-      --dns <DNS>          DoH URL or plain DNS IP [default: https://doh.pub/dns-query]
-      --hosts <HOSTS>      Custom hosts file path (standard format: IP domain)
+      --dns <DNS>          DoH URL or plain DNS IP, comma-separated [default: https://doh.pub/dns-query]
+      --hosts <HOSTS>      Custom hosts file path for non-target direct/tunnel overrides
       --trust-ca           Install CA certificate to system trust store (run on first use or when certificate expires)
 ```
 
@@ -98,7 +98,7 @@ cargo run -- --firefox "/usr/bin/firefox"
 # Custom port
 cargo run -- --port 9090
 
-# Use custom hosts file (CF IPs → ECH, others → direct)
+# Use custom hosts file for non-target direct/tunnel overrides
 cargo run -- --hosts ./my_hosts.txt
 
 # Trust CA certificate (first-time setup, installs to OS trust store)
@@ -106,6 +106,18 @@ cargo run -- --trust-ca
 
 # All options
 cargo run -- -b -p 9090 -u https://lain.bgm.tv --hosts ./hosts
+```
+
+### Runtime Notes
+
+- Target hosts resolve through Cloudflare DoH over ECH, keep only Cloudflare
+  A records, and do not fall back to direct TLS.
+- `--dns` is used to bootstrap `cloudflare-dns.com`; built-in Cloudflare DoH
+  IPs are used if bootstrap DNS fails.
+- `--hosts` is currently used for non-target direct TLS and raw CONNECT
+  tunnels only; it does not override target-host ECH resolution.
+- `bangumi.tv` is intentionally unsupported because it is not behind
+  Cloudflare, so the target ECH path does not apply.
 
 ## Development
 
@@ -118,7 +130,16 @@ cargo run -- -b -p 9090 -u https://lain.bgm.tv --hosts ./hosts
 ### Build
 
 ```bash
-# 1. Install OpenSSL 4.0 via Conan (first time only)
+# 1. Create a temporary Conan recipe and install OpenSSL 4.0 (first time only)
+mkdir -p conan
+cat > conan/conanfile.txt <<'EOF'
+[requires]
+openssl/4.0.1
+[generators]
+PkgConfigDeps
+VirtualBuildEnv
+VirtualRunEnv
+EOF
 conan profile detect --force
 # Linux/macOS:
 conan install conan --build=missing -s build_type=Release
