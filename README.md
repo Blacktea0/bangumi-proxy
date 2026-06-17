@@ -33,7 +33,7 @@ When the browser accesses a target site, traffic follows this path:
 
 ```text
 Browser
-  -> 127.0.0.1:8080 (bangumi-proxy)
+  -> 127.0.0.1:10721 (bangumi-proxy)
   -> DNS / hosts resolution
   -> ECH TLS or direct TLS to the remote server
   -> bidirectional relay between browser and server
@@ -224,7 +224,7 @@ cargo build --release
 bangumi-proxy [OPTIONS]
 
 Options:
-  -p, --port <PORT>        Listening port [default: 8080]
+  -p, --port <PORT>        Listening port [default: 10721]
   -b, --browser            Launch browser with auto-configured proxy
   -u, --url <URL>          URL to open in browser [default: https://bgm.tv]
       --chrome [PATH]      Use Chrome (optional custom path)
@@ -239,7 +239,7 @@ Options:
 ### Quick Start
 
 ```bash
-# Start the default proxy at 127.0.0.1:8080
+# Start the default proxy at 127.0.0.1:10721
 bangumi-proxy
 
 # Auto-detect a browser and open bgm.tv
@@ -261,7 +261,7 @@ If you do not use `-b`, configure your browser manually:
 ```text
 HTTP proxy:  127.0.0.1
 HTTPS proxy: 127.0.0.1
-Port:        8080
+Port:        10721
 ```
 
 ### Custom DNS

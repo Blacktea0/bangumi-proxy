@@ -65,7 +65,7 @@ refactor(ech): extract GREASE ECH into C helper for Windows compat
 bangumi-proxy [OPTIONS]
 
 Options:
-  -p, --port <PORT>        Listening port [default: 8080]
+  -p, --port <PORT>        Listening port [default: 10721]
   -b, --browser            Launch browser with auto-configured proxy (auto-detect priority: chrome > chromium > edge > firefox)
   -u, --url <URL>          URL to open in browser [default: https://bgm.tv]
       --chrome [PATH]      Use Chrome (optional custom path)
@@ -80,7 +80,7 @@ Options:
 ### Examples
 
 ```bash
-# Default: proxy on :8080, no browser
+# Default: proxy on :10721, no browser
 cargo run
 
 # Auto-detect and launch browser with proxy
@@ -146,5 +146,5 @@ cargo build
 cargo build --release
 
 # 4. Test
-curl -x http://127.0.0.1:8080 http://chii.in/
+curl -x http://127.0.0.1:10721 http://chii.in/
 ```
