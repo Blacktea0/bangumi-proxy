@@ -81,7 +81,7 @@ fn main() -> io::Result<()> {
     let gui_launch = browser::is_gui_launch();
     if gui_launch {
         if let Some((kind, exe)) = browser::auto_detect_browser() {
-            browser::launch_browser(kind, &exe, &addr, "https://bgm.tv");
+            browser::launch_browser(kind, &exe, &addr, "https://bgm.tv", already_trusted);
         } else {
             eprintln!("[browser] No supported browser found");
         }
@@ -92,10 +92,10 @@ fn main() -> io::Result<()> {
                 eprintln!("[browser] {} not found", kind.name());
                 std::process::exit(1);
             });
-        browser::launch_browser(kind, &exe, &addr, &args.url);
+        browser::launch_browser(kind, &exe, &addr, &args.url, already_trusted);
     } else if args.browser {
         if let Some((kind, exe)) = browser::auto_detect_browser() {
-            browser::launch_browser(kind, &exe, &addr, &args.url);
+            browser::launch_browser(kind, &exe, &addr, &args.url, already_trusted);
         } else {
             eprintln!("[browser] No supported browser found");
             std::process::exit(1);

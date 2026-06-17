@@ -156,11 +156,15 @@ fn snap_profile_dir(kind: BrowserKind, exe: &str) -> Option<String> {
     };
     Some(format!("{home}/snap/{snap_name}/common/bangumi-proxy"))
 }
-pub fn launch_browser(kind: BrowserKind, exe: &str, proxy: &str, url: &str) {
+pub fn launch_browser(kind: BrowserKind, exe: &str, proxy: &str, url: &str, ca_trusted: bool) {
     let profile = browser_profile_dir(kind, exe);
     let profile_s = profile.display().to_string();
     println!("[browser] {} proxy=http://{proxy} url={url}", kind.name());
     println!("[browser] exe={exe}");
+    println!(
+        "[browser] CA trust={}",
+        if ca_trusted { "trusted" } else { "untrusted" }
+    );
     println!("[browser] profile={profile_s}\n");
 
     if kind.is_chromium() {
@@ -170,8 +174,10 @@ pub fn launch_browser(kind: BrowserKind, exe: &str, proxy: &str, url: &str) {
             "--no-first-run".into(),
             "--no-default-browser-check".into(),
             format!("--user-data-dir={profile_s}"),
-            "--ignore-certificate-errors".into(),
         ];
+        if !ca_trusted {
+            args.push("--ignore-certificate-errors".into());
+        }
         #[cfg(target_os = "linux")]
         {
             extern "C" {
@@ -192,20 +198,24 @@ pub fn launch_browser(kind: BrowserKind, exe: &str, proxy: &str, url: &str) {
         // overwritten by Firefox, unlike prefs.js).
         let (host, port) = proxy.rsplit_once(':').unwrap_or(("127.0.0.1", "8080"));
         let _ = std::fs::create_dir_all(&profile);
-        let _ = std::fs::write(
-            profile.join("user.js"),
-            format!(
+        let _ = std::fs::write(profile.join("user.js"), {
+            let mut prefs = format!(
                 "user_pref(\"network.proxy.type\", 1);\n\
                  user_pref(\"network.proxy.http\", \"{host}\");\n\
                  user_pref(\"network.proxy.http_port\", {port});\n\
                  user_pref(\"network.proxy.ssl\", \"{host}\");\n\
                  user_pref(\"network.proxy.ssl_port\", {port});\n\
                  user_pref(\"network.proxy.no_proxies_on\", \"\");\n\
-                 user_pref(\"security.enterprise_roots.enabled\", true);\n\
-                 user_pref(\"security.OCSP.enabled\", 0);\n\
-                 user_pref(\"security.cert_pinning.enforcement_level\", 0);\n",
-            ),
-        );
+                 user_pref(\"security.enterprise_roots.enabled\", true);\n",
+            );
+            if !ca_trusted {
+                prefs.push_str(
+                    "user_pref(\"security.OCSP.enabled\", 0);\n\
+                         user_pref(\"security.cert_pinning.enforcement_level\", 0);\n",
+                );
+            }
+            prefs
+        });
         let mut cmd = std::process::Command::new(exe);
         cmd.args(["--no-remote", "--profile", profile_s.as_str(), url]);
         #[cfg(target_os = "windows")]
