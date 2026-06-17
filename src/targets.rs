@@ -1,6 +1,6 @@
 use std::net::Ipv4Addr;
 
-pub const TARGETS: &[&str] = &["chii.in", "lain.bgm.tv", "bgm.tv", "next.bgm.tv"];
+pub const TARGETS: &[&str] = &["chii.in", "lain.bgm.tv", "bgm.tv", "next.bgm.tv", "api.bgm.tv"];
 
 pub fn is_target(host: &str) -> bool {
     TARGETS

@@ -7,6 +7,7 @@
 - `chii.in`
 - `lain.bgm.tv`
 - `next.bgm.tv`
+- `api.bgm.tv`
 
 It prefers **ECH (Encrypted Client Hello)** when connecting to Cloudflare
 backends, which helps hide the real SNI in the TLS handshake and work around
@@ -51,7 +52,7 @@ checks the request type:
 Target domains are defined in `src/targets.rs`:
 
 ```text
-chii.in / lain.bgm.tv / bgm.tv / next.bgm.tv
+chii.in / lain.bgm.tv / bgm.tv / next.bgm.tv / api.bgm.tv
 ```
 
 These domains and their subdomains use the Bangumi-specific path. Other domains

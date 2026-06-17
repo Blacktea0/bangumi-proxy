@@ -41,7 +41,7 @@ fn main() -> io::Result<()> {
 
     println!("bangumi-proxy — HTTP/HTTPS + ECH proxy");
     println!("  Proxy:  http://{addr}");
-    println!("  Sites:  chii.in / lain.bgm.tv / bgm.tv / next.bgm.tv");
+    println!("  Sites:  {}", targets::TARGETS.join(" / "));
     println!("  DNS:    {}", args.dns.join(", "));
     println!("  Hosts:  {}", args.hosts.as_deref().unwrap_or("(none)"));
     println!("  MITM:   self-signed CA, HTTPS enabled");
