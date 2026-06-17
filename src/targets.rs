@@ -1,6 +1,34 @@
 use std::net::Ipv4Addr;
 
-pub const TARGETS: &[&str] = &["chii.in", "lain.bgm.tv", "bgm.tv", "next.bgm.tv", "api.bgm.tv"];
+pub const TARGETS: &[&str] = &[
+    "chii.in",
+    "lain.bgm.tv",
+    "bgm.tv",
+    "next.bgm.tv",
+    "api.bgm.tv",
+];
+
+const CLOUDFLARE_IPV4_CIDRS: &[(u32, u8)] = &[
+    (ipv4_as_u32(173, 245, 48, 0), 20),
+    (ipv4_as_u32(103, 21, 244, 0), 22),
+    (ipv4_as_u32(103, 22, 200, 0), 22),
+    (ipv4_as_u32(103, 31, 4, 0), 22),
+    (ipv4_as_u32(141, 101, 64, 0), 18),
+    (ipv4_as_u32(108, 162, 192, 0), 18),
+    (ipv4_as_u32(190, 93, 240, 0), 20),
+    (ipv4_as_u32(188, 114, 96, 0), 20),
+    (ipv4_as_u32(197, 234, 240, 0), 22),
+    (ipv4_as_u32(198, 41, 128, 0), 17),
+    (ipv4_as_u32(162, 158, 0, 0), 15),
+    (ipv4_as_u32(104, 16, 0, 0), 13),
+    (ipv4_as_u32(104, 24, 0, 0), 14),
+    (ipv4_as_u32(172, 64, 0, 0), 13),
+    (ipv4_as_u32(131, 0, 72, 0), 22),
+];
+
+const fn ipv4_as_u32(a: u8, b: u8, c: u8, d: u8) -> u32 {
+    ((a as u32) << 24) | ((b as u32) << 16) | ((c as u32) << 8) | d as u32
+}
 
 pub fn is_target(host: &str) -> bool {
     TARGETS
@@ -9,19 +37,58 @@ pub fn is_target(host: &str) -> bool {
 }
 
 pub fn is_cloudflare_ip(ip: Ipv4Addr) -> bool {
-    let o = ip.octets();
-    // 104.16.0.0/12, 172.64.0.0/13, 162.158.0.0/15, 188.114.96.0/20,
-    // 190.93.240.0/20, 197.234.240.0/22, 198.41.128.0/17, 131.0.72.0/22,
-    // 103.21.244.0/22, 103.22.200.0/22, 103.31.4.0/22
-    (o[0] == 104 && o[1] >= 16 && o[1] <= 31)
-        || (o[0] == 172 && o[1] >= 64 && o[1] <= 71)
-        || (o[0] == 162 && o[1] == 158)
-        || (o[0] == 188 && o[1] == 114)
-        || (o[0] == 190 && o[1] == 93)
-        || (o[0] == 197 && o[1] == 234)
-        || (o[0] == 198 && o[1] == 41)
-        || (o[0] == 131 && o[1] == 0)
-        || (o[0] == 103 && o[1] == 21 && o[2] >= 244 && o[2] <= 247)
-        || (o[0] == 103 && o[1] == 22 && o[2] >= 200 && o[2] <= 203)
-        || (o[0] == 103 && o[1] == 31 && o[2] >= 4 && o[2] <= 7)
+    let ip = u32::from(ip);
+
+    CLOUDFLARE_IPV4_CIDRS
+        .iter()
+        .any(|&(network, prefix)| ipv4_in_cidr(ip, network, prefix))
+}
+
+fn ipv4_in_cidr(ip: u32, network: u32, prefix: u8) -> bool {
+    let mask = u32::MAX << (32 - prefix);
+    (ip & mask) == (network & mask)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_cloudflare_ip;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn matches_cloudflare_ipv4_ranges() {
+        for ip in [
+            Ipv4Addr::new(173, 245, 48, 0),
+            Ipv4Addr::new(103, 21, 244, 1),
+            Ipv4Addr::new(103, 22, 200, 1),
+            Ipv4Addr::new(103, 31, 4, 1),
+            Ipv4Addr::new(141, 101, 64, 1),
+            Ipv4Addr::new(108, 162, 192, 1),
+            Ipv4Addr::new(190, 93, 240, 1),
+            Ipv4Addr::new(188, 114, 96, 1),
+            Ipv4Addr::new(197, 234, 240, 1),
+            Ipv4Addr::new(198, 41, 128, 1),
+            Ipv4Addr::new(162, 159, 255, 255),
+            Ipv4Addr::new(104, 27, 255, 255),
+            Ipv4Addr::new(172, 71, 255, 255),
+            Ipv4Addr::new(131, 0, 75, 255),
+        ] {
+            assert!(is_cloudflare_ip(ip), "{ip} should match");
+        }
+    }
+
+    #[test]
+    fn rejects_ips_outside_cloudflare_ipv4_ranges() {
+        for ip in [
+            Ipv4Addr::new(173, 245, 47, 255),
+            Ipv4Addr::new(141, 101, 128, 0),
+            Ipv4Addr::new(108, 162, 191, 255),
+            Ipv4Addr::new(188, 114, 112, 0),
+            Ipv4Addr::new(198, 41, 127, 255),
+            Ipv4Addr::new(104, 28, 0, 0),
+            Ipv4Addr::new(172, 72, 0, 0),
+            Ipv4Addr::new(131, 0, 76, 0),
+        ] {
+            assert!(!is_cloudflare_ip(ip), "{ip} should not match");
+        }
+    }
 }
