@@ -25,12 +25,26 @@ pub fn doh_json(host: &str, path: &str) -> io::Result<String> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "utf8"))
 }
 
-pub fn parse_a(json: &str) -> Option<Ipv4Addr> {
-    let answer = json.find("\"Answer\"")?;
-    let data = json[answer..].find("\"data\":\"")?;
-    let addr = &json[answer + data + 8..];
-    let end = addr.find('"')?;
-    addr[..end].parse().ok()
+pub fn parse_a_records(json: &str) -> Vec<Ipv4Addr> {
+    let Some(answer) = json.find("\"Answer\"") else {
+        return Vec::new();
+    };
+
+    let mut ips = Vec::new();
+    let mut rest = &json[answer..];
+    while let Some(data) = rest.find("\"data\":\"") {
+        let addr = &rest[data + 8..];
+        let Some(end) = addr.find('"') else {
+            break;
+        };
+        if let Ok(ip) = addr[..end].parse::<Ipv4Addr>() {
+            if !ips.contains(&ip) {
+                ips.push(ip);
+            }
+        }
+        rest = &addr[end..];
+    }
+    ips
 }
 
 pub fn resolve_plain_dns(server: &str, host: &str) -> io::Result<Ipv4Addr> {
@@ -80,27 +94,35 @@ pub fn resolve_plain_dns(server: &str, host: &str) -> io::Result<Ipv4Addr> {
     Err(io::Error::new(io::ErrorKind::NotFound, "no A"))
 }
 
-pub fn resolve_multi(host: &str, servers: &[String]) -> io::Result<Ipv4Addr> {
+pub fn resolve_multi_no_fallback(host: &str, servers: &[String]) -> io::Result<Vec<Ipv4Addr>> {
+    let mut last_err = None;
     for server in servers {
         if is_doh(server) {
-            if let Ok(ip) = resolve_doh_server(server, host) {
-                return Ok(ip);
+            match resolve_doh_server_multi(server, host) {
+                Ok(ips) if !ips.is_empty() => return Ok(ips),
+                Ok(_) => last_err = Some(io::Error::new(io::ErrorKind::NotFound, "no A")),
+                Err(err) => last_err = Some(err),
             }
         } else if is_plain_dns(server) {
-            if let Ok(ip) = resolve_plain_server(server, host) {
-                return Ok(ip);
+            match resolve_plain_server(server, host) {
+                Ok(ip) => return Ok(vec![ip]),
+                Err(err) => last_err = Some(err),
             }
         } else {
             // unknown format — try both
-            if let Ok(ip) = resolve_doh_server(server, host) {
-                return Ok(ip);
+            match resolve_doh_server_multi(server, host) {
+                Ok(ips) if !ips.is_empty() => return Ok(ips),
+                Ok(_) => {}
+                Err(_) => {}
             }
-            if let Ok(ip) = resolve_plain_server(server, host) {
-                return Ok(ip);
+            match resolve_plain_server(server, host) {
+                Ok(ip) => return Ok(vec![ip]),
+                Err(err) => last_err = Some(err),
             }
         }
     }
-    system_dns(host)
+
+    Err(last_err.unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no A")))
 }
 
 fn is_doh(s: &str) -> bool {
@@ -111,7 +133,7 @@ fn is_plain_dns(s: &str) -> bool {
     s.parse::<Ipv4Addr>().is_ok() || s.contains(':')
 }
 
-fn resolve_doh_server(server: &str, host: &str) -> io::Result<Ipv4Addr> {
+fn resolve_doh_server_multi(server: &str, host: &str) -> io::Result<Vec<Ipv4Addr>> {
     let base = server
         .trim_start_matches("https://")
         .trim_start_matches("http://");
@@ -120,7 +142,12 @@ fn resolve_doh_server(server: &str, host: &str) -> io::Result<Ipv4Addr> {
         .map(|(host, path)| (host, format!("/{path}")))
         .unwrap_or((base, "/dns-query".into()));
     let json = doh_json(doh_host, &format!("{path}?name={host}&type=A"))?;
-    parse_a(&json).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no A"))
+    let ips = parse_a_records(&json);
+    if ips.is_empty() {
+        Err(io::Error::new(io::ErrorKind::NotFound, "no A"))
+    } else {
+        Ok(ips)
+    }
 }
 
 fn resolve_plain_server(server: &str, host: &str) -> io::Result<Ipv4Addr> {
@@ -134,23 +161,6 @@ fn resolve_plain_server(server: &str, host: &str) -> io::Result<Ipv4Addr> {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "can't resolve DNS server"))?
     };
     resolve_plain_dns(&addr, host)
-}
-
-pub fn system_dns(host: &str) -> io::Result<Ipv4Addr> {
-    for server in &["119.29.29.29", "223.5.5.5"] {
-        if let Ok(ip) = resolve_plain_dns(server, host) {
-            return Ok(ip);
-        }
-    }
-
-    format!("{host}:443")
-        .to_socket_addrs()?
-        .find(|addr| addr.is_ipv4())
-        .map(|addr| match addr.ip() {
-            std::net::IpAddr::V4(ip) => ip,
-            _ => unreachable!(),
-        })
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no A"))
 }
 
 fn tls_skip() -> openssl::ssl::SslConnector {

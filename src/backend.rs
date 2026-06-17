@@ -4,59 +4,53 @@ use std::net::{Ipv4Addr, TcpStream};
 use foreign_types_shared::ForeignType;
 
 use crate::ech::{connect_ech, init_openssl, EchCache};
-use crate::targets::is_cloudflare_ip;
+use crate::targets::{is_cloudflare_ip, is_target};
 
 pub fn open_backend(
     host: &str,
     cache: &EchCache,
 ) -> io::Result<openssl::ssl::SslStream<TcpStream>> {
-    let max_retries = 2;
+    if !is_target(host) {
+        let connect_ip = cache.hosts.get(host).copied();
+        return connect_direct(host, connect_ip);
+    }
+
+    let ips = cache.get_target_ips(host)?;
+    let ecl = match cache.get_ech() {
+        Ok(ecl) => ecl,
+        Err(err) => {
+            cache.invalidate();
+            return Err(err);
+        }
+    };
+
     let mut last_err = None;
-
-    for attempt in 0..max_retries {
-        let ip = match cache.get_ip(host) {
-            Ok(ip) => ip,
-            Err(err) => {
-                eprintln!(
-                    "[backend] {host} resolve failed (attempt {}): {err}",
-                    attempt + 1
-                );
-                last_err = Some(err);
-                cache.invalidate_ip(host);
-                continue;
-            }
-        };
-
-        // try ECH first for CF IPs
-        if is_cloudflare_ip(ip) {
-            if let Ok(ecl) = cache.get_ech() {
-                match connect_ech(host, ip, &ecl) {
-                    Ok(stream) => return Ok(stream),
-                    Err(err) => {
-                        eprintln!("[ECH] {host} -> {ip}: {err} (attempt {})", attempt + 1);
-                    }
-                }
-                cache.invalidate();
-            }
+    for ip in ips {
+        if !is_cloudflare_ip(ip) {
+            eprintln!("[backend] {host} -> {ip}: non-CF IP, refusing ECH");
+            continue;
         }
 
-        // fall back to direct TLS
-        let connect_ip = cache.hosts.get(host).copied();
-        match connect_direct(host, connect_ip) {
+        match connect_ech(host, ip, &ecl) {
             Ok(stream) => return Ok(stream),
-            Err(err) => {
-                eprintln!(
-                    "[TLS] {host} direct failed (attempt {}): {err}",
-                    attempt + 1
-                );
+            Err(err) if is_timeout(&err) => {
+                eprintln!("[ECH] {host} -> {ip}: timeout, trying next IP");
                 last_err = Some(err);
-                cache.invalidate_ip(host);
+            }
+            Err(err) => {
+                eprintln!("[ECH] {host} -> {ip}: {err}");
+                cache.invalidate();
+                cache.invalidate_ips(host);
+                return Err(err);
             }
         }
     }
 
-    Err(last_err
-        .unwrap_or_else(|| io::Error::new(io::ErrorKind::Other, "all connection attempts failed")))
+    Err(last_err.unwrap_or_else(|| io::Error::new(io::ErrorKind::Other, "all target IPs failed")))
+}
+
+fn is_timeout(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::TimedOut
 }
 
 /// Direct TLS connection (no ECH). If `connect_ip` is given, connect to that IP directly.

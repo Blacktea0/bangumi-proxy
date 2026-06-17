@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, TcpStream};
+use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 
 use foreign_types_shared::ForeignType;
 use foreign_types_shared::ForeignTypeRef;
 use parking_lot::Mutex;
 
-use crate::dns::{parse_a, resolve_multi, system_dns};
+use crate::dns::{parse_a_records, resolve_multi_no_fallback};
 use crate::targets::{is_cloudflare_ip, is_target};
 
 const OUTER_SNI: &str = "cloudflare-ech.com";
@@ -57,9 +57,9 @@ mod ffi {
 
 pub struct EchCache {
     config: Mutex<Option<Vec<u8>>>,
-    ips: Mutex<HashMap<String, Ipv4Addr>>,
+    ips: Mutex<HashMap<String, Vec<Ipv4Addr>>>,
     dns_servers: Vec<String>,
-    cf_ips: Vec<Ipv4Addr>,
+    cf_ips: Mutex<Option<Vec<Ipv4Addr>>>,
     pub hosts: HashMap<String, Ipv4Addr>,
 }
 
@@ -69,7 +69,7 @@ impl EchCache {
             config: Mutex::new(None),
             ips: Mutex::new(HashMap::new()),
             dns_servers,
-            cf_ips: CF_DOH_IPS.to_vec(),
+            cf_ips: Mutex::new(None),
             hosts,
         }
     }
@@ -79,8 +79,8 @@ impl EchCache {
             return Ok(config.clone());
         }
 
-        // try each CF DoH IP until GREASE succeeds
-        for &ip in &self.cf_ips {
+        // Try each resolved CF DoH IP until GREASE succeeds.
+        for ip in self.cloudflare_doh_ips()? {
             match grease_ech(ip) {
                 Ok(config) => {
                     println!("[ECH] {CF_DOH_HOST} -> {ip}, GREASE {} bytes", config.len());
@@ -98,76 +98,75 @@ impl EchCache {
         ))
     }
 
-    pub fn get_ip(&self, host: &str) -> io::Result<Ipv4Addr> {
-        if let Some(ip) = self.hosts.get(host) {
-            println!("[hosts] {host} -> {ip}");
-            return Ok(*ip);
-        }
-        if let Some(ip) = self.ips.lock().get(host) {
-            return Ok(*ip);
-        }
-
-        let ip = match self.resolve_via_ech_multi(host) {
-            Ok(ip) => {
-                println!("[DNS] {host} -> {ip} (ECH)");
-                ip
-            }
-            Err(err) => {
-                eprintln!("[DNS] ECH: {err}");
-                match self.resolve_host_multi(host) {
-                    Ok(ip) => {
-                        println!("[DNS] {host} -> {ip} (multi-server)");
-                        ip
-                    }
-                    Err(doh_err) => {
-                        eprintln!("[DNS] multi: {doh_err}");
-                        return self.fallback_or_err(host);
-                    }
-                }
-            }
-        };
-
-        if !is_cloudflare_ip(ip) && is_target(host) {
-            if let Some(&hosts_ip) = self.hosts.get(host) {
-                eprintln!("[DNS] {host} -> {ip} (poisoned! using hosts {hosts_ip})");
-                self.ips.lock().insert(host.to_string(), hosts_ip);
-                return Ok(hosts_ip);
-            }
+    pub fn get_target_ips(&self, host: &str) -> io::Result<Vec<Ipv4Addr>> {
+        if !is_target(host) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "ECH DNS is only for target hosts",
+            ));
         }
 
-        self.ips.lock().insert(host.to_string(), ip);
-        Ok(ip)
+        if let Some(ips) = self.ips.lock().get(host) {
+            return Ok(ips.clone());
+        }
+
+        let mut ips = self.resolve_via_ech_multi(host)?;
+        let original_len = ips.len();
+        ips.retain(|ip| is_cloudflare_ip(*ip));
+        if ips.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "target resolved to no Cloudflare IPs",
+            ));
+        }
+        if ips.len() != original_len {
+            eprintln!("[DNS] {host}: ignored non-Cloudflare A records");
+        }
+
+        println!("[DNS] {host} -> {:?} (ECH)", ips);
+        self.ips.lock().insert(host.to_string(), ips.clone());
+        Ok(ips)
     }
 
     pub fn invalidate(&self) {
         self.config.lock().take();
     }
 
-    pub fn invalidate_ip(&self, host: &str) {
+    pub fn invalidate_ips(&self, host: &str) {
         self.ips.lock().remove(host);
     }
 
-    fn fallback_or_err(&self, host: &str) -> io::Result<Ipv4Addr> {
-        if let Some(&ip) = self.hosts.get(host) {
-            println!("[DNS] {host} -> {ip} (hosts fallback)");
-            self.ips.lock().insert(host.to_string(), ip);
-            return Ok(ip);
+    fn cloudflare_doh_ips(&self) -> io::Result<Vec<Ipv4Addr>> {
+        if let Some(ips) = &*self.cf_ips.lock() {
+            return Ok(ips.clone());
         }
 
-        let ip = system_dns(host)?;
-        println!("[DNS] {host} -> {ip} (system)");
-        self.ips.lock().insert(host.to_string(), ip);
-        Ok(ip)
+        let mut ips = match resolve_multi_no_fallback(CF_DOH_HOST, &self.dns_servers) {
+            Ok(ips) => ips,
+            Err(err) => {
+                eprintln!("[DNS] {CF_DOH_HOST} bootstrap failed: {err}; using built-in IPs");
+                Vec::new()
+            }
+        };
+        let original_len = ips.len();
+        ips.retain(|ip| is_cloudflare_ip(*ip));
+        if ips.is_empty() {
+            ips = CF_DOH_IPS.to_vec();
+            println!("[DNS] {CF_DOH_HOST} -> {:?} (built-in)", ips);
+        } else {
+            if ips.len() != original_len {
+                eprintln!("[DNS] {CF_DOH_HOST}: ignored non-Cloudflare A records");
+            }
+            println!("[DNS] {CF_DOH_HOST} -> {:?} (bootstrap)", ips);
+        }
+        *self.cf_ips.lock() = Some(ips.clone());
+        Ok(ips)
     }
 
-    fn resolve_host_multi(&self, host: &str) -> io::Result<Ipv4Addr> {
-        resolve_multi(host, &self.dns_servers)
-    }
-
-    fn resolve_via_ech_multi(&self, host: &str) -> io::Result<Ipv4Addr> {
+    fn resolve_via_ech_multi(&self, host: &str) -> io::Result<Vec<Ipv4Addr>> {
         let ecl = self.get_ech()?;
 
-        let doh_query = |ip: Ipv4Addr| -> io::Result<Ipv4Addr> {
+        let doh_query = |ip: Ipv4Addr| -> io::Result<Vec<Ipv4Addr>> {
             let mut backend = connect_ech(CF_DOH_HOST, ip, &ecl)?;
             backend.write_all(
                 format!("GET /dns-query?name={host}&type=A HTTP/1.1\r\nHost: {CF_DOH_HOST}\r\nAccept: application/dns-json\r\nConnection: close\r\n\r\n")
@@ -181,15 +180,19 @@ impl EchCache {
                 .windows(4)
                 .position(|w| w == b"\r\n\r\n")
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no hdr"))?;
-            parse_a(&String::from_utf8_lossy(&buf[header_end + 4..]))
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no A"))
+            let ips = parse_a_records(&String::from_utf8_lossy(&buf[header_end + 4..]));
+            if ips.is_empty() {
+                Err(io::Error::new(io::ErrorKind::NotFound, "no A"))
+            } else {
+                Ok(ips)
+            }
         };
 
-        // try each CF IP, and for each CF IP try each DNS server path
+        // Try each resolved CF DoH IP. Do not fall back to non-ECH DNS.
         let mut last_err = None;
-        for &cf_ip in &self.cf_ips {
+        for cf_ip in self.cloudflare_doh_ips()? {
             match doh_query(cf_ip) {
-                Ok(ip) => return Ok(ip),
+                Ok(ips) => return Ok(ips),
                 Err(err) => {
                     eprintln!("[ECH] DNS via {cf_ip}: {err}");
                     last_err = Some(err);
@@ -249,7 +252,10 @@ pub fn connect_ech(
     let outer = std::ffi::CString::new(OUTER_SNI).unwrap();
     unsafe { ffi::SSL_ech_set1_server_names(ssl.as_ptr(), inner.as_ptr(), outer.as_ptr(), 0) };
 
-    let tcp = TcpStream::connect(format!("{ip}:443"))?;
+    let tcp = TcpStream::connect_timeout(
+        &SocketAddrV4::new(ip, 443).into(),
+        std::time::Duration::from_secs(10),
+    )?;
     tcp.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
     tcp.set_write_timeout(Some(std::time::Duration::from_secs(10)))?;
     let stream = ssl
