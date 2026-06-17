@@ -39,6 +39,41 @@ Browser
   -> bidirectional relay between browser and server
 ```
 
+```mermaid
+sequenceDiagram
+    participant Browser
+    participant Proxy as bangumi-proxy
+    participant Resolver as hosts / DNS / DoH
+    participant ECH as ECH config cache
+    participant Server as Bangumi / Cloudflare
+
+    Browser->>Proxy: HTTP request or HTTPS CONNECT
+    Proxy->>Proxy: match target host
+    alt non-target host
+        Proxy->>Server: open raw TCP tunnel
+        Browser->>Server: end-to-end TLS traffic
+        Server-->>Browser: end-to-end TLS traffic
+    else Bangumi target host
+        Proxy-->>Browser: 200 Connection Established
+        Proxy->>Browser: local TLS with generated host cert
+        Proxy->>Resolver: resolve target IP
+        Resolver-->>Proxy: hosts entry or A records
+        opt Cloudflare IP and no cached ECH config
+            Proxy->>ECH: fetch Cloudflare ECH retry config
+            ECH-->>Proxy: ECH config list
+        end
+        alt ECH available
+            Proxy->>Server: TLS with encrypted inner SNI
+        else ECH unavailable or failed
+            Proxy->>Server: direct TLS fallback
+        end
+        Browser->>Proxy: decrypted HTTP over local TLS
+        Proxy-->>Browser: decrypted HTTP over local TLS
+        Proxy->>Server: relay over backend TLS
+        Server-->>Proxy: relay over backend TLS
+    end
+```
+
 The proxy listens on `127.0.0.1:<port>`. For each browser request, it first
 checks the request type:
 
@@ -277,6 +312,12 @@ build.rs         Detects OpenSSL ECH headers and compiles the C helper
 - `ca-key.pem` is the local CA private key. Do not upload, share, or commit it.
 - OpenSSL ECH support is required. Builds fail if `openssl/ech.h` cannot be
   found through `OPENSSL_DIR` / `OPENSSL_INCLUDE_DIR` or the system OpenSSL path.
+
+## Known Issues
+
+- Cloudflare Turnstile challenges cannot be reliably passed through MITM TLS,
+  even when the local CA is trusted. Challenge and login hosts must be tunneled
+  end-to-end so the browser keeps its normal TLS session and fingerprint.
 
 ## License
 
