@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::path::Path;
 
 pub struct MitmCa {
     ca_key: rcgen::KeyPair,
@@ -73,6 +74,66 @@ impl MitmCa {
     }
 }
 
+fn decode_pem_certificates(pem: &str) -> Vec<Vec<u8>> {
+    let mut certs = Vec::new();
+    let mut current = String::new();
+    let mut in_cert = false;
+
+    for line in pem.lines().map(str::trim) {
+        if line == "-----BEGIN CERTIFICATE-----" {
+            current.clear();
+            in_cert = true;
+        } else if line == "-----END CERTIFICATE-----" {
+            if in_cert {
+                use base64::Engine;
+                if let Ok(der) = base64::engine::general_purpose::STANDARD.decode(&current) {
+                    certs.push(der);
+                }
+            }
+            current.clear();
+            in_cert = false;
+        } else if in_cert {
+            current.push_str(line);
+        }
+    }
+
+    certs
+}
+
+fn read_pem_certificate_der(path: &Path) -> std::io::Result<Vec<u8>> {
+    let pem = std::fs::read_to_string(path)?;
+    decode_pem_certificates(&pem)
+        .into_iter()
+        .next()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "no certificate found"))
+}
+
+#[cfg(windows)]
+fn powershell_single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(windows)]
+fn windows_root_store_has_certificate(ca_der: &Path) -> bool {
+    let Some(path) = ca_der.to_str() else {
+        return false;
+    };
+    let script = format!(
+        "$path = (Resolve-Path -LiteralPath {}).Path; \
+         $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($path); \
+         $found = Get-ChildItem -Path Cert:\\LocalMachine\\Root,Cert:\\CurrentUser\\Root -ErrorAction SilentlyContinue | \
+             Where-Object {{ $_.Thumbprint -eq $cert.Thumbprint }} | Select-Object -First 1; \
+         if ($null -ne $found) {{ exit 0 }} else {{ exit 1 }}",
+        powershell_single_quoted(path)
+    );
+
+    std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 /// Trust CA certificate. Returns true if already trusted (no action needed).
 /// prompt=true: interactive mode (--trust-ca), prompts to install if untrusted;
 /// prompt=false: silent check, only prints warning if untrusted.
@@ -84,29 +145,21 @@ pub fn trust_ca(prompt: bool) -> bool {
         return false;
     }
     let ca_der = dir.join("ca.cer");
+    let ca_der_bytes = match read_pem_certificate_der(&ca_pem) {
+        Ok(der) => der,
+        Err(err) => {
+            eprintln!("[trust] failed to read CA certificate: {err}");
+            return false;
+        }
+    };
 
     // ---- Windows: certutil -addstore Root ----
     #[cfg(windows)]
     {
-        let pem = std::fs::read_to_string(&ca_pem).unwrap();
-        let b64: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
-        use base64::Engine;
-        std::fs::write(
-            &ca_der,
-            base64::engine::general_purpose::STANDARD
-                .decode(&b64)
-                .unwrap(),
-        )
-        .unwrap();
+        std::fs::write(&ca_der, &ca_der_bytes).unwrap();
         println!("[trust] DER: {}", ca_der.display());
-        let check = std::process::Command::new("certutil")
-            .args(["-store", "Root", "bangumi-proxy CA"])
-            .output();
-        let trusted = check
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains("bangumi-proxy CA"))
-            .unwrap_or(false);
-        if trusted {
-            println!("[trust] ✓ Already trusted (Windows Root store)");
+        if windows_root_store_has_certificate(&ca_der) {
+            println!("[trust] ✓ Current CA already trusted (Windows Root store)");
             return true;
         }
         if !prompt {
@@ -143,8 +196,15 @@ pub fn trust_ca(prompt: bool) -> bool {
             std::path::PathBuf::from("/usr/local/share/ca-certificates")
         };
         let target = target_dir.join("bangumi-proxy-ca.crt");
-        if target.exists() {
-            println!("[trust] ✓ Already installed: {}", target.display());
+        if target.exists()
+            && read_pem_certificate_der(&target)
+                .map(|installed_der| installed_der == ca_der_bytes)
+                .unwrap_or(false)
+        {
+            println!(
+                "[trust] ✓ Current CA already installed: {}",
+                target.display()
+            );
             return true;
         }
         if !prompt {
@@ -199,10 +259,15 @@ pub fn trust_ca(prompt: bool) -> bool {
             ])
             .output();
         let trusted = check
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains("bangumi-proxy CA"))
+            .map(|o| {
+                o.status.success()
+                    && decode_pem_certificates(&String::from_utf8_lossy(&o.stdout))
+                        .into_iter()
+                        .any(|installed_der| installed_der == ca_der_bytes)
+            })
             .unwrap_or(false);
         if trusted {
-            println!("[trust] ✓ Already trusted (macOS System keychain)");
+            println!("[trust] ✓ Current CA already trusted (macOS System keychain)");
             return true;
         }
         if !prompt {
